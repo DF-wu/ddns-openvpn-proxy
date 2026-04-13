@@ -1,0 +1,27 @@
+services:
+  vpn-proxy:
+    image: ${IMAGE_NAME}
+    container_name: vpn-proxy
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    ports:
+      - "${SOCKS_PORT:-1080}:1080"
+    volumes:
+      - ${VPN_CONFIG_DIR:-./vpn}:/config:ro
+    environment:
+      - DDNS_HOSTNAME=${DDNS_HOSTNAME}
+      - DDNS_CHECK_INTERVAL=${DDNS_CHECK_INTERVAL:-60}
+      - REMOTE_PORT=${REMOTE_PORT:-1194}
+      - REMOTE_PROTO=${REMOTE_PROTO:-udp}
+    healthcheck:
+      test: ["CMD", "pgrep", "openvpn"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
