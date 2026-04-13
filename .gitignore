@@ -1,0 +1,10 @@
+config/openvpn/*.ovpn
+config/openvpn/*.crt
+config/openvpn/*.key
+config/openvpn/*.pem
+config/openvpn/*.auth
+config/openvpn/*.txt
+state/
+.env
+tests/e2e/.workdir/
+.serena/
