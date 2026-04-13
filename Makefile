@@ -1,5 +1,4 @@
 SHELL := /usr/bin/env bash
-CONFIG ?=
 
 .PHONY: help validate validate-config validate-compose validate-repo up down logs smoke
 
@@ -8,10 +7,10 @@ help:
 	  'make validate         Validate the compose stack and OpenVPN config contract' \
 	  'make validate-config  Validate ./config/openvpn/ (or pass CONFIG=...)' \
 	  'make validate-compose Validate docker-compose.yml with example inputs' \
-	  'make up               Start the OpenVPN + SOCKS5 stack' \
+	  'make up               Start the DDNS-aware Gluetun stack' \
 	  'make down             Stop the stack' \
-	  'make logs             Tail the runtime logs' \
-	  'make smoke            Run the runtime contract smoke test'
+	  'make logs             Tail the Gluetun and DDNS watcher logs' \
+	  'make smoke            Run the DDNS render/restart smoke test'
 
 validate: validate-config validate-compose
 
@@ -31,7 +30,7 @@ down:
 	docker compose down --remove-orphans
 
 logs:
-	docker compose logs -f vpn
+	docker compose logs -f gluetun ddns-watcher
 
 smoke:
 	@tests/e2e/smoke.sh

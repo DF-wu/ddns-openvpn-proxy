@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This validator intentionally stays host-side and dependency-light.
-# It catches the common mistakes that make the stack fail before Docker even starts.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/openvpn-ddns-lib.sh
+source "$repo_root/scripts/openvpn-ddns-lib.sh"
 
 input_path="${1:-}"
 
 if [[ -z "$input_path" ]]; then
-  if [[ -n "${OPENVPN_CONFIG_DIR:-}" ]]; then
+  if [[ -n "${OPENVPN_SOURCE_CONFIG:-}" ]]; then
+    input_path="$OPENVPN_SOURCE_CONFIG"
+  elif [[ -n "${OPENVPN_CONFIG_DIR:-}" ]]; then
     input_path="$OPENVPN_CONFIG_DIR/openvpn"
-  elif [[ -f ./.env ]]; then
-    env_dir="$(grep -E '^OPENVPN_CONFIG_DIR=' ./.env | tail -1 | cut -d= -f2- || true)"
-    input_path="${env_dir:-./config}/openvpn"
   else
     input_path="./config/openvpn"
   fi
@@ -34,42 +34,29 @@ else
   config_file="$input_path"
 fi
 
-if [[ -z "$config_file" || ! -f "$config_file" ]]; then
+if [[ ! -f "$config_file" ]]; then
   printf 'ERROR: OpenVPN config file not found: %s\n' "$config_file" >&2
   exit 1
 fi
 
 config_dir="$(cd "$(dirname "$config_file")" && pwd)"
-config_file="$(cd "$config_dir" && pwd)/$(basename "$config_file")"
+config_file="$config_dir/$(basename "$config_file")"
 
-remote_line="$(grep -E '^[[:space:]]*remote[[:space:]]+' "$config_file" | head -1 || true)"
+remote_line="$(get_primary_remote_line "$config_file" || true)"
 if [[ -z "$remote_line" ]]; then
   printf 'ERROR: No remote line found in %s\n' "$config_file" >&2
   exit 1
 fi
 
 read -r _ remote_host remote_port remote_proto _ <<<"$remote_line"
-
-config_proto="$(grep -E '^[[:space:]]*proto[[:space:]]+' "$config_file" | head -1 | awk '{print $2}' || true)"
-config_port="$(grep -E '^[[:space:]]*port[[:space:]]+' "$config_file" | head -1 | awk '{print $2}' || true)"
-
-remote_port="${remote_port:-$config_port}"
-remote_proto="${remote_proto:-$config_proto}"
-
 remote_port="${remote_port:-1194}"
 remote_proto="${remote_proto:-udp}"
 
 printf 'Validated config: %s\n' "$config_file"
-printf 'Primary remote: host=%s port=%s proto=%s\n' "$remote_host" "${remote_port:-<missing>}" "${remote_proto:-<missing>}"
+printf 'Primary remote: host=%s port=%s proto=%s\n' "$remote_host" "$remote_port" "$remote_proto"
 
-# We warn on literal IPs because the whole point of this project is DDNS-friendly hostnames.
 if [[ "$remote_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  printf 'WARNING: remote host looks like an IPv4 address, not a hostname. DDNS benefits only apply when you keep a hostname in remote.\n' >&2
-fi
-
-if [[ -z "${remote_host:-}" ]]; then
-  printf 'ERROR: Expected remote line format to include at least a hostname after the remote directive.\n' >&2
-  exit 1
+  printf 'WARNING: remote host already looks like a literal IPv4 address. This repository is meant for hostname/DDNS-driven source configs.\n' >&2
 fi
 
 check_path_directive() {
@@ -78,7 +65,6 @@ check_path_directive() {
     [[ -z "$line" ]] && continue
     read -r _ maybe_path _ <<<"$line"
 
-    # auth-user-pass with no second field is valid and means interactive or provider-specific auth handling.
     if [[ "$directive" == "auth-user-pass" && -z "${maybe_path:-}" ]]; then
       continue
     fi
@@ -96,7 +82,7 @@ check_path_directive() {
       printf 'ERROR: %s references missing file: %s\n' "$directive" "$resolved_path" >&2
       exit 1
     fi
-  done < <(grep -E "^[[:space:]]*$directive[[:space:]]+" "$config_file" || true)
+  done < <(grep -E "^[[:space:]]*$directive([[:space:]]+.+)?$" "$config_file" || true)
 }
 
 for directive in ca cert key tls-auth tls-crypt auth-user-pass; do
