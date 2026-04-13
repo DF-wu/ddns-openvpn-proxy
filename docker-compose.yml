@@ -1,10 +1,32 @@
 services:
-  # This repository now reuses a maintained upstream runtime that already combines
-  # OpenVPN and microsocks. That keeps the repo focused on config, docs, and tests.
-  vpn:
-    image: ${VPN_IMAGE:-binhex/arch-privoxyvpn@sha256:75c98f92941ac0fd6d2c8533a51e3482472ed2651954836091e0e95148996469}
-    container_name: ${VPN_CONTAINER_NAME:-openvpn-ddns-socks5}
+  ddns-init:
+    build:
+      context: .
+      dockerfile: watcher/Dockerfile
+    restart: "no"
+    volumes:
+      - ${OPENVPN_CONFIG_DIR:-./config}:/gluetun/source:ro
+      - ${STATE_DIR:-./state}:/gluetun/state
+    environment:
+      TZ: ${TZ:-UTC}
+      OPENVPN_SOURCE_CONFIG: ${OPENVPN_SOURCE_CONFIG:-}
+      OPENVPN_SOURCE_DIR: /gluetun/source/openvpn
+      OPENVPN_RENDERED_CONFIG: /gluetun/state/openvpn/current.ovpn
+      DDNS_HOSTNAME: ${DDNS_HOSTNAME:-}
+      DDNS_POLL_SECONDS: ${DDNS_POLL_SECONDS:-60}
+      DDNS_COOLDOWN_SECONDS: ${DDNS_COOLDOWN_SECONDS:-15}
+      DDNS_RESOLVER: ${DDNS_RESOLVER:-}
+      DDNS_OVERRIDE_IP: ${DDNS_OVERRIDE_IP:-}
+      STATE_DIR: /gluetun/state
+    entrypoint: ["/app/scripts/ddns-init.sh"]
+
+  gluetun:
+    image: ${GLUETUN_IMAGE:-qmcgaw/gluetun:latest}
+    container_name: ${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}
     restart: unless-stopped
+    depends_on:
+      ddns-init:
+        condition: service_completed_successfully
     cap_add:
       - NET_ADMIN
     devices:
@@ -12,25 +34,39 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      # Upstream microsocks listens on 9118; we publish 1080 by default for users.
-      - "${SOCKS5_PORT:-1080}:9118/tcp"
+      - "${HTTP_PROXY_PORT:-8888}:8888/tcp"
     volumes:
-      # binhex expects OpenVPN files under /config/openvpn/.
-      - ${OPENVPN_CONFIG_DIR:-./config}:/config
+      - ${OPENVPN_CONFIG_DIR:-./config}:/gluetun/source:ro
+      - ${STATE_DIR:-./state}:/gluetun/state
     environment:
       TZ: ${TZ:-UTC}
-      PUID: ${PUID:-0}
-      PGID: ${PGID:-0}
-      UMASK: ${UMASK:-022}
-      VPN_ENABLED: yes
-      VPN_PROV: custom
-      VPN_CLIENT: openvpn
-      ENABLE_PRIVOXY: no
-      ENABLE_SOCKS: yes
-      SOCKS_USER: ${SOCKS5_USER:-socks5}
-      SOCKS_PASS: ${SOCKS5_PASSWORD:-change-me}
-      # Required so the upstream firewall allows traffic from your machine/LAN.
-      LAN_NETWORK: ${LAN_NETWORK:?Set LAN_NETWORK in .env before starting the stack}
-      NAME_SERVERS: ${NAME_SERVERS:-1.1.1.1,1.0.0.1}
-      VPN_USER: ${OPENVPN_USER:-}
-      VPN_PASS: ${OPENVPN_PASSWORD:-}
+      VPN_SERVICE_PROVIDER: custom
+      VPN_TYPE: openvpn
+      OPENVPN_CUSTOM_CONFIG: /gluetun/state/openvpn/current.ovpn
+      HTTPPROXY: on
+      HTTPPROXY_LISTENING_ADDRESS: :8888
+
+  ddns-watcher:
+    build:
+      context: .
+      dockerfile: watcher/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      gluetun:
+        condition: service_started
+    volumes:
+      - ${OPENVPN_CONFIG_DIR:-./config}:/gluetun/source:ro
+      - ${STATE_DIR:-./state}:/gluetun/state
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      TZ: ${TZ:-UTC}
+      OPENVPN_SOURCE_CONFIG: ${OPENVPN_SOURCE_CONFIG:-}
+      OPENVPN_SOURCE_DIR: /gluetun/source/openvpn
+      OPENVPN_RENDERED_CONFIG: /gluetun/state/openvpn/current.ovpn
+      DDNS_HOSTNAME: ${DDNS_HOSTNAME:-}
+      DDNS_POLL_SECONDS: ${DDNS_POLL_SECONDS:-60}
+      DDNS_COOLDOWN_SECONDS: ${DDNS_COOLDOWN_SECONDS:-15}
+      DDNS_RESOLVER: ${DDNS_RESOLVER:-}
+      DDNS_OVERRIDE_IP: ${DDNS_OVERRIDE_IP:-}
+      GLUETUN_CONTAINER_NAME: ${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}
+      STATE_DIR: /gluetun/state
