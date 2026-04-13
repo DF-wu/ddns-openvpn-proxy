@@ -1,27 +1,36 @@
 services:
-  vpn-proxy:
-    image: ${IMAGE_NAME}
-    container_name: vpn-proxy
+  # This repository now reuses a maintained upstream runtime that already combines
+  # OpenVPN and microsocks. That keeps the repo focused on config, docs, and tests.
+  vpn:
+    image: ${VPN_IMAGE:-binhex/arch-privoxyvpn@sha256:75c98f92941ac0fd6d2c8533a51e3482472ed2651954836091e0e95148996469}
+    container_name: ${VPN_CONTAINER_NAME:-openvpn-ddns-socks5}
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
     devices:
-      - /dev/net/tun
-    dns:
-      - 1.1.1.1
-      - 1.0.0.1
+      - /dev/net/tun:/dev/net/tun
+    security_opt:
+      - no-new-privileges:true
     ports:
-      - "${SOCKS_PORT:-1080}:1080"
+      # Upstream microsocks listens on 9118; we publish 1080 by default for users.
+      - "${SOCKS5_PORT:-1080}:9118/tcp"
     volumes:
-      - ${VPN_CONFIG_DIR:-./vpn}:/config:ro
+      # binhex expects OpenVPN files under /config/openvpn/.
+      - ${OPENVPN_CONFIG_DIR:-./config}:/config
     environment:
-      - DDNS_HOSTNAME=${DDNS_HOSTNAME}
-      - DDNS_CHECK_INTERVAL=${DDNS_CHECK_INTERVAL:-60}
-      - REMOTE_PORT=${REMOTE_PORT:-1194}
-      - REMOTE_PROTO=${REMOTE_PROTO:-udp}
-    healthcheck:
-      test: ["CMD", "pgrep", "openvpn"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      TZ: ${TZ:-UTC}
+      PUID: ${PUID:-0}
+      PGID: ${PGID:-0}
+      UMASK: ${UMASK:-022}
+      VPN_ENABLED: yes
+      VPN_PROV: custom
+      VPN_CLIENT: openvpn
+      ENABLE_PRIVOXY: no
+      ENABLE_SOCKS: yes
+      SOCKS_USER: ${SOCKS5_USER:-socks5}
+      SOCKS_PASS: ${SOCKS5_PASSWORD:-change-me}
+      # Required so the upstream firewall allows traffic from your machine/LAN.
+      LAN_NETWORK: ${LAN_NETWORK:?Set LAN_NETWORK in .env before starting the stack}
+      NAME_SERVERS: ${NAME_SERVERS:-1.1.1.1,1.0.0.1}
+      VPN_USER: ${OPENVPN_USER:-}
+      VPN_PASS: ${OPENVPN_PASSWORD:-}
