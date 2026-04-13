@@ -1,103 +1,88 @@
-# Operations Guide
+# Operations
 
-## Prerequisites
+## Prepare the source config
 
-- Docker Engine
-- Docker Compose v2
-- a Linux host or VM with `/dev/net/tun`
-- access to an OpenVPN server
-- a custom OpenVPN client config under `./config/openvpn/*.ovpn`
+Place your OpenVPN profile and any referenced files under `config/openvpn/`.
 
-## Files expected in `./config/openvpn/`
-
-At minimum:
-
-- one `.ovpn` client profile
-
-Only keep **one** `.ovpn` profile in this directory for each stack instance.
-
-Sometimes also:
-
-- `ca.crt`
-- `client.crt`
-- `client.key`
-- `ta.key`
-- `auth.txt`
-
-If your `.ovpn` file uses inline `<ca>`, `<cert>`, or `<key>` blocks, you may only need the `.ovpn` file itself.
-
-## Start the stack
+Example:
 
 ```bash
-make validate
-make up
+mkdir -p config/openvpn
+cp examples/openvpn/custom.ovpn config/openvpn/client.ovpn
 ```
 
-## Stop the stack
+Your source config should keep the hostname-based remote line, for example:
+
+```ovpn
+remote vpn.example.com 1194
+```
+
+## Configure the stack
 
 ```bash
+cp .env.example .env
+```
+
+Recommended values:
+
+- `DDNS_HOSTNAME`: set this explicitly if you want the watcher to ignore any alternate remote lines in the config
+- `DDNS_POLL_SECONDS=60`: reasonable default for home DDNS
+- `DDNS_COOLDOWN_SECONDS=15`: prevents restart bursts if DNS flaps
+- `HTTP_PROXY_PORT=8888`
+- `GLUETUN_CONTAINER_NAME=ddns-openvpn-proxy`
+
+## Start and stop
+
+```bash
+make up
 make down
 ```
 
-## Read logs
+## Logs
 
 ```bash
 make logs
 ```
 
-Or inspect the service directly:
+You should see:
+
+- `ddns-init` logging the resolved IP and rendered config path
+- `gluetun` starting from `/gluetun/state/openvpn/current.ovpn`
+- `ddns-watcher` logging `IP unchanged` until a DDNS update happens
+
+When the DDNS target changes, expected watcher flow is:
+
+1. detect new IP
+2. re-render the runtime config
+3. call `docker restart ddns-openvpn-proxy`
+
+## Runtime artifacts
+
+- `state/ddns/last-ip`
+- `state/openvpn/current.ovpn`
+
+These are intentionally ignored by git.
+
+## Troubleshooting
+
+### Gluetun fails at startup
+
+Check that `state/openvpn/current.ovpn` exists and that the source config contains at least one valid `remote` line.
+
+### Watcher never detects changes
+
+Check DNS resolution from the watcher container:
 
 ```bash
-docker compose logs vpn
+docker compose exec ddns-watcher sh
 ```
 
-## Validate SOCKS5 access
+Then verify the hostname resolves and inspect `state/ddns/last-ip`.
 
-```bash
-curl --socks5-hostname 127.0.0.1:1080 \
-  --proxy-user "$SOCKS5_USER:$SOCKS5_PASSWORD" \
-  https://ifconfig.me
-```
+### Proxy port is reachable but traffic does not pass
 
-## Updating your DDNS record
+That usually means the HTTP proxy is up but the tunnel is not healthy. Inspect Gluetun logs first.
 
-No repo change is required.
+### Docker socket exposure
 
-Keep your `.ovpn` file pointing to a hostname such as:
-
-```ovpn
-remote vpn.example.com 1194 udp
-```
-
-For fast reconnect behavior after the DDNS target changes, also keep these directives in the client config:
-
-```ovpn
-resolv-retry infinite
-keepalive 10 60
-```
-
-When the A record changes, the OpenVPN client will observe the new endpoint on reconnect boundaries.
-
-## LAN access to the SOCKS5 port
-
-The upstream image protects the container with firewall rules. To reach the SOCKS5 port from your machine, set `LAN_NETWORK` in `.env` to your local CIDR.
-
-Helper:
-
-```bash
-scripts/detect-lan-network.sh
-```
-
-## Common mistakes
-
-### Hard-coding an IP in `remote`
-
-That works as a plain OpenVPN client configuration, but it defeats the DDNS requirement.
-
-### Mounting the wrong path
-
-The upstream runtime expects your OpenVPN files under `/config/openvpn/`, which means this repo expects them under `./config/openvpn/` on the host.
-
-### Expecting live session migration on DNS change
-
-DDNS helps a reconnect land on the right host. It does not turn an existing OpenVPN session into a live-moving connection.
+The watcher needs `/var/run/docker.sock` so it can restart Gluetun. That is a privileged capability. Keep this stack on a host you control and do not expose the watcher container externally.

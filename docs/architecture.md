@@ -1,68 +1,72 @@
 # Architecture
 
-## Design goal
+## Goal
 
-This repository exists to provide a **SOCKS5 proxy that sends traffic through an OpenVPN tunnel**, while keeping the OpenVPN server address compatible with a **hostname or DDNS hostname**.
+Use Gluetun as the OpenVPN client runtime, but restore DDNS behavior by resolving the hostname outside Gluetun and restarting the container when the resolved IP changes.
 
-The key engineering decision is to **reuse a mature upstream runtime** instead of maintaining a fragile custom VPN lifecycle in shell.
+## Why this exists
 
-## Chosen building block
+For custom OpenVPN configs, Gluetun's documented flow expects an IP-based remote target instead of live hostname resolution. That is a good default for DNS-leak prevention, but it means a DDNS hostname change is not picked up automatically by the running tunnel.
 
-### Upstream runtime: binhex/arch-privoxyvpn
+The workaround here is intentional and narrow:
 
-We use `binhex/arch-privoxyvpn` in **custom OpenVPN mode with built-in microsocks**.
+1. keep the source `.ovpn` hostname-based for operator clarity
+2. render a runtime `.ovpn` with the current IPv4
+3. restart Gluetun when the DDNS hostname resolves differently
 
-Why:
+## Services
 
-- it is actively maintained
-- it accepts custom OpenVPN config files without forcing the remote host to be an IP address
-- it already includes a SOCKS5 server, so we do not have to maintain a proxy sidecar
-- it still leaves room for future WireGuard work without forcing WireGuard into this version
+### `ddns-init`
 
-## Why we removed the old shell lifecycle
+- resolves the effective hostname once at startup
+- renders `state/openvpn/current.ovpn`
+- seeds `state/ddns/last-ip`
 
-The previous prototype:
+This prevents a startup race where Gluetun would otherwise boot before the rendered config exists.
 
-- resolved the hostname to an IP before launch
-- rewrote the OpenVPN `remote` line at runtime
-- tried to restart OpenVPN through a non-existent `restart-vpn` path
-- mixed daemonized processes with a late-starting supervisor
+### `gluetun`
 
-That design was brittle and unnecessary.
+- runs the OpenVPN client using `OPENVPN_CUSTOM_CONFIG`
+- exposes Gluetun's built-in HTTP proxy on port `8888`
+- is restarted by the watcher when the rendered remote IP changes
 
-The refactor removes all of that.
+### `ddns-watcher`
 
-## DDNS model
+- polls the hostname on a fixed interval
+- compares the latest IPv4 with `state/ddns/last-ip`
+- rewrites `state/openvpn/current.ovpn` when the IP changes
+- restarts the Gluetun container through the Docker socket
 
-This project does **not** implement a custom DDNS watcher.
+## Data flow
 
-Instead, it relies on the correct abstraction:
+```text
+source .ovpn with hostname
+        │
+        ▼
+  ddns-init / ddns-watcher
+        │ resolve hostname
+        ▼
+state/openvpn/current.ovpn
+        │
+        ▼
+     Gluetun
+        │
+        ├── OpenVPN tunnel
+        └── HTTP proxy :8888
+```
 
-1. keep a hostname in the `.ovpn` `remote` line
-2. let OpenVPN resolve that hostname
-3. rely on reconnect behavior when the server endpoint changes
-4. make reconnect happen promptly with `keepalive` or `ping-restart`
+## Why restart the whole container
 
-That model is simpler, easier to reason about, and better aligned with how OpenVPN is supposed to be used.
+The user explicitly asked to restart Gluetun when the DDNS target changes. Doing a real container restart also avoids relying on undocumented or insufficiently proven config-reload behavior inside a live Gluetun process. The tradeoff is that the watcher needs Docker socket access.
 
-## Compose topology
+## Why referenced file paths are normalized
 
-The stack is now a single primary runtime container.
+Gluetun rewrites the custom OpenVPN config internally, so relative paths for directives like `ca`, `cert`, `key`, `tls-auth`, `tls-crypt`, and `auth-user-pass` are unsafe. The renderer converts those paths to absolute container paths under `/gluetun/source/openvpn/` so the referenced files remain valid after Gluetun loads the rendered config.
 
-That means:
+## Scope limits
 
-- OpenVPN and SOCKS5 live in the same upstream runtime image
-- this repo only needs to mount config and set a small set of environment variables
-- the public SOCKS5 port is mapped from container port `9118` to host port `1080` by default
-
-## Future WireGuard extension point
-
-Future WireGuard support should extend the **runtime contract**, not resurrect the old custom shell lifecycle.
-
-That future work should add:
-
-- a separate validation path
-- separate documentation
-- separate runtime tests
-
-This repo intentionally does not pretend OpenVPN and WireGuard are interchangeable.
+- IPv4 only in v1
+- single source profile by default
+- HTTP proxy only
+- Docker socket access is required for `ddns-watcher`
+- no attempt to hot-swap the IP without reconnecting the tunnel

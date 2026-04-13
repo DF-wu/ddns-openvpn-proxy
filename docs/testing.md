@@ -1,50 +1,36 @@
 # Testing
 
-## Fast validation
+## Validation
 
-Use this before every run:
+Run the repository checks first:
 
 ```bash
 make validate
 ```
 
-That runs:
+This validates:
 
-- OpenVPN config validation
-- Docker Compose rendering validation
+- the OpenVPN source profile contract
+- referenced files for non-inlined directives
+- Docker Compose rendering with example inputs
 
-If `./.env` exists, validation uses your real operator inputs. If it does not exist, validation falls back to the example values bundled with the repository.
-
-## Runtime contract smoke test
+## Smoke test
 
 ```bash
 make smoke
 ```
 
-What it does:
+The smoke test is intentionally lightweight. It does not require a real VPN server. Instead it verifies the DDNS-specific behavior this repository owns:
 
-1. generates a temporary OpenVPN server fixture using `kylemanna/openvpn`
-2. generates a client config whose `remote` host is a hostname, not an IP
-3. starts the local OpenVPN server fixture so Docker DNS can resolve `openvpn-server`
-4. starts the upstream `binhex/arch-privoxyvpn` stack from this repository
-5. checks that the runtime accepts the hostname-based `.ovpn` contract instead of rejecting it as IP-only
-6. checks that the tunnel interface is actually created
-7. starts the upstream microsocks helper for the local fixture and checks that the SOCKS listener really opens
+- the renderer rewrites a hostname-based `remote` to the current IP
+- the renderer rewrites relative certificate/key/auth paths to absolute container paths
+- the watcher detects an IP change
+- the watcher restarts the Gluetun container name it was configured with
 
-This test is intentionally conservative. It validates the runtime contract that matters most for this repository: **a custom `.ovpn` file with a hostname remote is accepted by the chosen upstream image and can bring up the OpenVPN tunnel**.
+## What is not covered automatically
 
-For a full real-world acceptance test on your target host, run the documented `curl --socks5-hostname ...` command after `make up`.
+- a full tunnel bring-up against a real OpenVPN server
+- host-specific `/dev/net/tun` behavior
+- firewall behavior outside the compose stack
 
-## Failure-path tests
-
-This repository ships lightweight executable failure tests through the validator:
-
-- missing OpenVPN config
-- missing `remote` line
-- missing referenced files
-
-Run one manually like this:
-
-```bash
-scripts/validate-openvpn-config.sh ./tests/fixtures/invalid/missing-remote.ovpn
-```
+Those checks should be done manually on the target Linux Docker host after `make up`.
