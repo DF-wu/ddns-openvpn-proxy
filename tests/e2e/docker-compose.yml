@@ -1,0 +1,10 @@
+services:
+  openvpn-server:
+    image: kylemanna/openvpn:latest
+    entrypoint: ["openvpn", "--config", "/etc/openvpn/openvpn.conf"]
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ${E2E_OPENVPN_SERVER_DIR:?set E2E_OPENVPN_SERVER_DIR}:/etc/openvpn
