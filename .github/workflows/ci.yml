@@ -3,8 +3,28 @@ name: CI
 on:
   push:
     branches: [main, master]
+    paths:
+      - '.github/workflows/ci.yml'
+      - 'docker-compose.yml'
+      - '.env.example'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'Makefile'
   pull_request:
     branches: [main, master]
+    paths:
+      - '.github/workflows/ci.yml'
+      - 'docker-compose.yml'
+      - '.env.example'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'Makefile'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -17,3 +37,8 @@ jobs:
         run: |
           chmod +x scripts/*.sh tests/e2e/*.sh
           make validate-repo
+
+      - name: Run smoke test
+        run: |
+          chmod +x scripts/*.sh tests/e2e/*.sh
+          make smoke

@@ -1,0 +1,57 @@
+name: Publish watcher image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-watcher.yml'
+      - 'watcher/**'
+      - 'scripts/ddns-init.sh'
+      - 'scripts/openvpn-ddns-lib.sh'
+      - 'scripts/render-openvpn-config.sh'
+      - 'scripts/watch-ddns-and-restart.sh'
+  workflow_dispatch:
+
+concurrency:
+  group: publish-watcher-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ddns-openvpn-proxy-watcher
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+      - name: Build and push watcher image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: watcher/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
