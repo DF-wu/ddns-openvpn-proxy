@@ -11,7 +11,7 @@ mkdir -p config/openvpn
 cp examples/openvpn/custom.ovpn config/openvpn/client.ovpn
 ```
 
-Your source config should keep the hostname-based remote line, for example:
+The source profile should keep the hostname-based remote line:
 
 ```ovpn
 remote vpn.example.com 1194
@@ -23,25 +23,38 @@ remote vpn.example.com 1194
 cp .env.example .env
 ```
 
+Set at least these values:
+
+- `WATCHER_IMAGE`
+- `GLUETUN_IMAGE`
+- `GLUETUN_CONTAINER_NAME`
+- `DDNS_HOSTNAME` if you do not want it parsed from the source profile
+
 Recommended values:
 
-- `DDNS_HOSTNAME`: set this explicitly if you want the watcher to ignore any alternate remote lines in the config
-- `DDNS_POLL_SECONDS=60`: reasonable default for home DDNS
-- `DDNS_COOLDOWN_SECONDS=15`: prevents restart bursts if DNS flaps
+- `WATCHER_IMAGE=ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest`
+- `DDNS_POLL_SECONDS=60`
+- `DDNS_COOLDOWN_SECONDS=15`
 - `HTTP_PROXY_PORT=8888`
 - `GLUETUN_CONTAINER_NAME=ddns-openvpn-proxy`
 
-## Start and stop
+## Pull and start
 
 ```bash
-make up
-make down
+docker compose pull
+docker compose up -d
+```
+
+To stop the stack:
+
+```bash
+docker compose down --remove-orphans
 ```
 
 ## Logs
 
 ```bash
-make logs
+docker compose logs -f gluetun ddns-watcher
 ```
 
 You should see:
@@ -78,6 +91,10 @@ docker compose exec ddns-watcher sh
 ```
 
 Then verify the hostname resolves and inspect `state/ddns/last-ip`.
+
+### The target machine tries to build an image
+
+It should not. The compose file uses `WATCHER_IMAGE`, not `build:`. Run `docker compose config` and confirm both `ddns-init` and `ddns-watcher` point at the same pulled image.
 
 ### Proxy port is reachable but traffic does not pass
 

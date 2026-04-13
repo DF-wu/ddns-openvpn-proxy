@@ -12,7 +12,7 @@ This validates:
 
 - the OpenVPN source profile contract
 - referenced files for non-inlined directives
-- Docker Compose rendering with example inputs
+- Docker Compose rendering with image-based watcher inputs
 
 ## Smoke test
 
@@ -25,7 +25,7 @@ The smoke test is intentionally lightweight. It does not require a real VPN serv
 - the renderer rewrites a hostname-based `remote` to the current IP
 - the renderer rewrites relative certificate/key/auth paths to absolute container paths
 - the watcher detects an IP change
-- the watcher restarts the Gluetun container name it was configured with
+- the watcher restarts the configured Gluetun container name
 
 ## What is not covered automatically
 
@@ -33,4 +33,10 @@ The smoke test is intentionally lightweight. It does not require a real VPN serv
 - host-specific `/dev/net/tun` behavior
 - firewall behavior outside the compose stack
 
-Those checks should be done manually on the target Linux Docker host after `make up`.
+Those checks should be done manually on the target Linux Docker host after `docker compose up -d`.
+
+## GitHub Actions
+
+- `CI` runs validation and smoke checks only
+- `publish-watcher` builds the watcher image and pushes it to GHCR
+- image publishing is limited to watcher-related changes on `main`

@@ -26,6 +26,7 @@ DDNS_RESOLVER=
 DDNS_OVERRIDE_IP=203.0.113.10
 HTTP_PROXY_PORT=8888
 GLUETUN_CONTAINER_NAME=ddns-openvpn-proxy
+WATCHER_IMAGE=ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest
 GLUETUN_IMAGE=qmcgaw/gluetun:latest
 EOF
 

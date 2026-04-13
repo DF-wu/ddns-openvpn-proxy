@@ -1,8 +1,6 @@
 services:
   ddns-init:
-    build:
-      context: .
-      dockerfile: watcher/Dockerfile
+    image: ${WATCHER_IMAGE:-ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest}
     restart: "no"
     volumes:
       - ${OPENVPN_CONFIG_DIR:-./config}:/gluetun/source:ro
@@ -47,9 +45,7 @@ services:
       HTTPPROXY_LISTENING_ADDRESS: :8888
 
   ddns-watcher:
-    build:
-      context: .
-      dockerfile: watcher/Dockerfile
+    image: ${WATCHER_IMAGE:-ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest}
     restart: unless-stopped
     depends_on:
       gluetun:

@@ -1,62 +1,70 @@
 # DDNS-aware Gluetun OpenVPN Proxy
 
-This repository does one thing: run a custom **OpenVPN client inside Gluetun**, expose Gluetun's built-in **HTTP proxy**, and automatically recover when your DDNS hostname resolves to a new IP.
+This repository packages one deployable pattern:
 
-The source `.ovpn` stays hostname-based. A small sidecar renders `state/openvpn/current.ovpn` with the current IPv4, and when that IP changes it **restarts the Gluetun container** so OpenVPN reconnects using the updated runtime config.
+- use the official `qmcgaw/gluetun` image for OpenVPN
+- use a small watcher image from GHCR for DDNS rendering and restart logic
+- deploy with pulled images, environment variables, and local OpenVPN files only
 
-## What this repository does
+The source `.ovpn` stays hostname-based. The watcher renders `state/openvpn/current.ovpn` with the current IPv4, then restarts Gluetun when that IP changes.
 
-- keeps the source `.ovpn` readable and DDNS-friendly
-- renders a runtime `.ovpn` with the current IPv4 target
-- starts Gluetun from that rendered config
-- polls the DDNS hostname for IP changes
-- restarts Gluetun when the rendered remote IP changes
-- exposes an HTTP proxy on port `8888`
+## What you deploy
+
+- `gluetun` from the official upstream image
+- `ddns-init` from the watcher image to render the first runtime config
+- `ddns-watcher` from the same watcher image to poll DDNS and restart Gluetun
 
 ## Quick start
 
 1. Put your OpenVPN files under `./config/openvpn/`.
-2. Copy the env file and adjust values.
+2. Copy the env file.
 
 ```bash
 cp .env.example .env
 ```
 
-3. Validate the config.
+3. Adjust `.env`.
+4. Validate the local config.
 
 ```bash
 make validate
 ```
 
-4. Start the stack.
+5. Pull the images.
 
 ```bash
-make up
+docker compose pull
 ```
 
-5. Watch logs.
+6. Start the stack.
 
 ```bash
-make logs
+docker compose up -d
 ```
 
-6. Use the HTTP proxy.
+7. Watch logs.
+
+```bash
+docker compose logs -f gluetun ddns-watcher
+```
+
+8. Test the HTTP proxy.
 
 ```bash
 curl -x http://127.0.0.1:8888 https://ifconfig.me
 ```
 
-## Required files
+## Required local files
 
-Keep exactly one source `.ovpn` file under `./config/openvpn/` unless you explicitly point `OPENVPN_SOURCE_CONFIG` at another file. Any referenced cert/key/auth files should live beside it unless they are inlined.
+Keep exactly one source `.ovpn` file under `./config/openvpn/` unless you set `OPENVPN_SOURCE_CONFIG` explicitly. Any referenced cert/key/auth files should live beside it unless they are inlined.
 
-The source config keeps the hostname:
+The source profile should keep the hostname-based `remote` line:
 
 ```ovpn
 remote vpn.example.com 1194
 ```
 
-The watcher resolves that hostname and writes the runtime file to:
+The watcher writes the rendered runtime profile to:
 
 ```text
 ./state/openvpn/current.ovpn
@@ -64,41 +72,44 @@ The watcher resolves that hostname and writes the runtime file to:
 
 ## Key environment variables
 
+- `WATCHER_IMAGE=ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest`
+- `GLUETUN_IMAGE=qmcgaw/gluetun:latest`
+- `GLUETUN_CONTAINER_NAME=ddns-openvpn-proxy`
 - `OPENVPN_CONFIG_DIR=./config`
 - `STATE_DIR=./state`
-- `DDNS_HOSTNAME=vpn.example.com` (optional; if blank, parsed from the `.ovpn` remote line)
+- `DDNS_HOSTNAME=vpn.example.com`
 - `DDNS_POLL_SECONDS=60`
 - `DDNS_COOLDOWN_SECONDS=15`
 - `HTTP_PROXY_PORT=8888`
-- `GLUETUN_IMAGE=qmcgaw/gluetun:latest`
-- `GLUETUN_CONTAINER_NAME=ddns-openvpn-proxy`
 
-## How the DDNS refresh works
+## How recovery works
 
 1. `ddns-init` resolves the hostname and renders `state/openvpn/current.ovpn`.
 2. `gluetun` starts from that rendered config.
-3. `ddns-watcher` keeps polling the hostname.
-4. When the IPv4 address changes, it re-renders the config and restarts the Gluetun container:
+3. `ddns-watcher` polls the hostname.
+4. When the IPv4 changes, it rewrites the runtime config and restarts the Gluetun container.
 
 ```text
 docker restart ddns-openvpn-proxy
 ```
 
-That makes Gluetun start again from the updated `state/openvpn/current.ovpn`, which is the whole point of this repository.
-
 ## Runtime requirements
 
 - Linux host with `/dev/net/tun`
 - Docker and Docker Compose
-- `/var/run/docker.sock` mounted into `ddns-watcher` so it can restart Gluetun
+- `/var/run/docker.sock` mounted into `ddns-watcher`
 
-## Commands
+## CI and publishing
+
+- `CI` runs `make validate-repo` and `make smoke`
+- `publish-watcher` builds and publishes the watcher image to GHCR
+- the publish workflow only runs on `main` when watcher-related files change
+- the watcher image is built for `linux/amd64` to keep CI fast and cheap
+
+## Repository commands
 
 ```bash
 make validate
-make up
-make down
-make logs
 make smoke
 ```
 
