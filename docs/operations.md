@@ -40,9 +40,17 @@ Recommended values:
 
 ## Pull and start
 
+Deploy after the `publish-watcher` workflow finishes for the commit you want to run.
+
 ```bash
 docker compose pull
 docker compose up -d
+```
+
+If the watcher package is private on GHCR, log in first:
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
 ```
 
 To stop the stack:
@@ -95,6 +103,10 @@ Then verify the hostname resolves and inspect `state/ddns/last-ip`.
 ### The target machine tries to build an image
 
 It should not. The compose file uses `WATCHER_IMAGE`, not `build:`. Run `docker compose config` and confirm both `ddns-init` and `ddns-watcher` point at the same pulled image.
+
+### The target machine is not amd64
+
+The published watcher image is `linux/amd64` only. If your host is `arm64`, either change the publish workflow to multi-arch or deploy on an amd64 machine.
 
 ### Proxy port is reachable but traffic does not pass
 

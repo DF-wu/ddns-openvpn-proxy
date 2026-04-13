@@ -97,6 +97,7 @@ docker restart ddns-openvpn-proxy
 
 - Linux host with `/dev/net/tun`
 - Docker and Docker Compose
+- `linux/amd64` host
 - `/var/run/docker.sock` mounted into `ddns-watcher`
 
 ## CI and publishing
@@ -105,6 +106,14 @@ docker restart ddns-openvpn-proxy
 - `publish-watcher` builds and publishes the watcher image to GHCR
 - the publish workflow only runs on `main` when watcher-related files change
 - the watcher image is built for `linux/amd64` to keep CI fast and cheap
+
+Deploy only after `publish-watcher` succeeds for the commit you want to run.
+
+If the GHCR package is private, log in first:
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+```
 
 ## Repository commands
 
