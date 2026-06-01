@@ -4,6 +4,7 @@ config/openvpn/*.key
 config/openvpn/*.pem
 config/openvpn/*.auth
 config/openvpn/*.txt
+config/wireguard/*.conf
 state/
 .env
 tests/e2e/.workdir/

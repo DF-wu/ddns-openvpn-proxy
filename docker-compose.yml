@@ -7,12 +7,18 @@ services:
       - ${STATE_DIR:-./state}:/gluetun/state
     environment:
       TZ: ${TZ:-UTC}
+      VPN_TYPE: ${VPN_TYPE:-openvpn}
       OPENVPN_SOURCE_CONFIG: ${OPENVPN_SOURCE_CONFIG:-}
       OPENVPN_SOURCE_DIR: /gluetun/source/openvpn
       OPENVPN_RENDERED_CONFIG: /gluetun/state/openvpn/current.ovpn
+      WIREGUARD_SOURCE_CONFIG: ${WIREGUARD_SOURCE_CONFIG:-}
+      WIREGUARD_SOURCE_DIR: /gluetun/source/wireguard
+      WIREGUARD_RENDERED_CONFIG: /gluetun/state/wireguard/wg0.conf
       DDNS_HOSTNAME: ${DDNS_HOSTNAME:-}
       DDNS_POLL_SECONDS: ${DDNS_POLL_SECONDS:-60}
       DDNS_COOLDOWN_SECONDS: ${DDNS_COOLDOWN_SECONDS:-15}
+      DDNS_INIT_RETRY_SECONDS: ${DDNS_INIT_RETRY_SECONDS:-5}
+      DDNS_INIT_MAX_ATTEMPTS: ${DDNS_INIT_MAX_ATTEMPTS:-0}
       DDNS_RESOLVER: ${DDNS_RESOLVER:-}
       DDNS_OVERRIDE_IP: ${DDNS_OVERRIDE_IP:-}
       STATE_DIR: /gluetun/state
@@ -39,10 +45,14 @@ services:
     environment:
       TZ: ${TZ:-UTC}
       VPN_SERVICE_PROVIDER: custom
-      VPN_TYPE: openvpn
+      VPN_TYPE: ${VPN_TYPE:-openvpn}
       OPENVPN_CUSTOM_CONFIG: /gluetun/state/openvpn/current.ovpn
+      WIREGUARD_CUSTOM_CONFIG: /gluetun/state/wireguard/wg0.conf
       HTTPPROXY: on
       HTTPPROXY_LISTENING_ADDRESS: :8888
+      HTTPPROXY_USER: ${HTTPPROXY_USER:-}
+      HTTPPROXY_PASSWORD: ${HTTPPROXY_PASSWORD:-}
+      HTTPPROXY_STEALTH: ${HTTPPROXY_STEALTH:-off}
 
   ddns-watcher:
     image: ${WATCHER_IMAGE:-ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest}
@@ -56,9 +66,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       TZ: ${TZ:-UTC}
+      VPN_TYPE: ${VPN_TYPE:-openvpn}
       OPENVPN_SOURCE_CONFIG: ${OPENVPN_SOURCE_CONFIG:-}
       OPENVPN_SOURCE_DIR: /gluetun/source/openvpn
       OPENVPN_RENDERED_CONFIG: /gluetun/state/openvpn/current.ovpn
+      WIREGUARD_SOURCE_CONFIG: ${WIREGUARD_SOURCE_CONFIG:-}
+      WIREGUARD_SOURCE_DIR: /gluetun/source/wireguard
+      WIREGUARD_RENDERED_CONFIG: /gluetun/state/wireguard/wg0.conf
       DDNS_HOSTNAME: ${DDNS_HOSTNAME:-}
       DDNS_POLL_SECONDS: ${DDNS_POLL_SECONDS:-60}
       DDNS_COOLDOWN_SECONDS: ${DDNS_COOLDOWN_SECONDS:-15}

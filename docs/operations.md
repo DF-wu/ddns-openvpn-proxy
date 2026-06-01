@@ -2,9 +2,9 @@
 
 ## Prepare the source config
 
-Place your OpenVPN profile and any referenced files under `config/openvpn/`.
+### OpenVPN
 
-Example:
+Place your OpenVPN profile and any referenced files under `config/openvpn/`.
 
 ```bash
 mkdir -p config/openvpn
@@ -17,6 +17,21 @@ The source profile should keep the hostname-based remote line:
 remote vpn.example.com 1194
 ```
 
+### WireGuard
+
+Place your WireGuard profile under `config/wireguard/`.
+
+```bash
+mkdir -p config/wireguard
+cp examples/wireguard/wg0.conf config/wireguard/wg0.conf
+```
+
+The source profile should keep the hostname-based Endpoint line:
+
+```conf
+Endpoint = vpn.example.com:51820
+```
+
 ## Configure the stack
 
 ```bash
@@ -25,6 +40,7 @@ cp .env.example .env
 
 Set at least these values:
 
+- `VPN_TYPE` — `openvpn` or `wireguard`
 - `WATCHER_IMAGE`
 - `GLUETUN_IMAGE`
 - `GLUETUN_CONTAINER_NAME`
@@ -32,10 +48,15 @@ Set at least these values:
 
 Recommended values:
 
+- `VPN_TYPE=openvpn`
 - `WATCHER_IMAGE=ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest`
 - `DDNS_POLL_SECONDS=60`
 - `DDNS_COOLDOWN_SECONDS=15`
+- `DDNS_INIT_RETRY_SECONDS=5`
+- `DDNS_INIT_MAX_ATTEMPTS=0` to keep retrying until the first render succeeds
 - `HTTP_PROXY_PORT=8888`
+- `HTTPPROXY_USER` and `HTTPPROXY_PASSWORD` if you want proxy auth
+- `HTTPPROXY_STEALTH=off` unless you specifically need stealth mode
 - `GLUETUN_CONTAINER_NAME=ddns-openvpn-proxy`
 
 ## Pull and start
@@ -68,8 +89,10 @@ docker compose logs -f gluetun ddns-watcher
 You should see:
 
 - `ddns-init` logging the resolved IP and rendered config path
-- `gluetun` starting from `/gluetun/state/openvpn/current.ovpn`
+- `gluetun` starting from the runtime config
 - `ddns-watcher` logging `IP unchanged` until a DDNS update happens
+
+If DNS is not ready when the stack starts, `ddns-init` now keeps retrying instead of failing the stack immediately.
 
 When the DDNS target changes, expected watcher flow is:
 
@@ -80,7 +103,8 @@ When the DDNS target changes, expected watcher flow is:
 ## Runtime artifacts
 
 - `state/ddns/last-ip`
-- `state/openvpn/current.ovpn`
+- `state/openvpn/current.ovpn` (OpenVPN)
+- `state/wireguard/wg0.conf` (WireGuard)
 
 These are intentionally ignored by git.
 
@@ -88,7 +112,24 @@ These are intentionally ignored by git.
 
 ### Gluetun fails at startup
 
-Check that `state/openvpn/current.ovpn` exists and that the source config contains at least one valid `remote` line.
+Check that the runtime config exists:
+
+- OpenVPN: `state/openvpn/current.ovpn`
+- WireGuard: `state/wireguard/wg0.conf`
+
+Verify the source config contains the expected hostname field:
+
+- OpenVPN: `remote` line
+- WireGuard: `Endpoint` line
+
+### ddns-init keeps retrying forever
+
+That usually means one of two things:
+
+- the DDNS hostname cannot be resolved from the container
+- the source config or referenced files are mounted incorrectly
+
+If you want a hard failure instead of infinite retry, set `DDNS_INIT_MAX_ATTEMPTS` to a non-zero value.
 
 ### Watcher never detects changes
 
@@ -112,6 +153,19 @@ The published watcher image is `linux/amd64` only. If your host is `arm64`, eith
 
 That usually means the HTTP proxy is up but the tunnel is not healthy. Inspect Gluetun logs first.
 
+### Proxy authentication fails
+
+If you enabled `HTTPPROXY_USER` and `HTTPPROXY_PASSWORD`, confirm your client is sending credentials to the proxy. For curl, use `-U USER:PASSWORD`.
+
 ### Docker socket exposure
 
 The watcher needs `/var/run/docker.sock` so it can restart Gluetun. That is a privileged capability. Keep this stack on a host you control and do not expose the watcher container externally.
+
+### WireGuard-specific: Gluetun reports "Endpoint is not an IP"
+
+This means the rendered WireGuard config still contains a hostname in the `Endpoint` line. Check that `ddns-init` ran successfully and that `state/wireguard/wg0.conf` contains an IP address. If the file looks correct, restart the stack:
+
+```bash
+docker compose down --remove-orphans
+docker compose up -d
+```
