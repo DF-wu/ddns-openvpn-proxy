@@ -16,7 +16,7 @@ This stack automates that whole cycle: detect, render, restart.
 
 ## Architecture
 
-### Three-service pipeline
+### Four-service pipeline
 
 ```
 source config (hostname-based)
@@ -26,10 +26,12 @@ source config (hostname-based)
         │       renders runtime config
         │       seeds last-ip file
         ▼
-    gluetun ── reads runtime config
+     gluetun ── reads runtime config
         │       establishes VPN tunnel
         │       exposes HTTP proxy on :8888
-        │       exposes SOCKS5 proxy on :1080 (via vproxy sidecar)
+        ▼
+    vproxy ──── shares gluetun network
+        │       exposes SOCKS5 proxy on :1080
         ▼
  ddns-watcher ── polls hostname periodically
                 compares with last-ip
@@ -37,7 +39,7 @@ source config (hostname-based)
                 restarts gluetun container
 ```
 
-### Why three services instead of one
+### Why four services instead of one
 
 **Gluetun is already solved.** The `qmcgaw/gluetun` image handles OpenVPN, WireGuard, firewall rules, HTTP proxying, and health checks. Reimplementing any of that would be a bug farm. This stack treats Gluetun as a black-box tunnel service and adds only the DDNS orchestration it does not provide.
 
@@ -213,7 +215,7 @@ If `DDNS_HOSTNAME` is blank, the stack parses the hostname from the primary `rem
 
 ```
 .
-├── docker-compose.yml              # 3-service stack definition
+├── docker-compose.yml              # 4-service stack definition
 ├── .env.example                    # All tunable variables
 ├── Makefile                        # validate, smoke, up, down, logs
 ├── scripts/

@@ -63,10 +63,12 @@ services:
         condition: service_started
     restart: unless-stopped
     entrypoint: ["/bin/sh", "-c"]
-    command: >
-      exec vproxy run --bind 0.0.0.0:1080 socks5
-      $${SOCKS5_USER:+-u "$${SOCKS5_USER}"}
-      $${SOCKS5_PASSWORD:+-p "$${SOCKS5_PASSWORD}"}
+    command: |
+      if [ -n "$${SOCKS5_USER}" ] && [ -n "$${SOCKS5_PASSWORD}" ]; then
+        exec vproxy run --bind 0.0.0.0:1080 socks5 -u "$${SOCKS5_USER}" -p "$${SOCKS5_PASSWORD}"
+      else
+        exec vproxy run --bind 0.0.0.0:1080 socks5
+      fi
 
   ddns-watcher:
     image: ${WATCHER_IMAGE:-ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest}
