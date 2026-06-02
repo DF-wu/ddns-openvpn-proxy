@@ -42,7 +42,7 @@ down:
 	docker compose down --remove-orphans
 
 logs:
-	docker compose logs -f gluetun ddns-watcher
+	docker compose logs -f gluetun vproxy ddns-watcher
 
 smoke: smoke-openvpn smoke-wireguard
 

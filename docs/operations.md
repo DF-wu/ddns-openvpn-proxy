@@ -57,6 +57,9 @@ Recommended values:
 - `HTTP_PROXY_PORT=8888`
 - `HTTPPROXY_USER` and `HTTPPROXY_PASSWORD` if you want proxy auth
 - `HTTPPROXY_STEALTH=off` unless you specifically need stealth mode
+- `SOCKS5_PROXY_PORT=1080`
+- `SOCKS5_USER` and `SOCKS5_PASSWORD` if you want SOCKS5 auth
+- `VPROXY_IMAGE=ghcr.io/0x676e67/vproxy:latest`
 - `GLUETUN_CONTAINER_NAME=ddns-openvpn-proxy`
 
 ## Pull and start
@@ -83,7 +86,7 @@ docker compose down --remove-orphans
 ## Logs
 
 ```bash
-docker compose logs -f gluetun ddns-watcher
+docker compose logs -f gluetun vproxy ddns-watcher
 ```
 
 You should see:
@@ -156,6 +159,20 @@ That usually means the HTTP proxy is up but the tunnel is not healthy. Inspect G
 ### Proxy authentication fails
 
 If you enabled `HTTPPROXY_USER` and `HTTPPROXY_PASSWORD`, confirm your client is sending credentials to the proxy. For curl, use `-U USER:PASSWORD`.
+
+### SOCKS5 proxy testing
+
+Test the SOCKS5 proxy:
+
+```bash
+curl --socks5 127.0.0.1:1080 https://ifconfig.me
+```
+
+If you enabled SOCKS5 authentication:
+
+```bash
+curl --socks5 127.0.0.1:1080 -U USER:PASSWORD https://ifconfig.me
+```
 
 ### Docker socket exposure
 

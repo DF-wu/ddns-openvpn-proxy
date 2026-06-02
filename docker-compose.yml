@@ -39,6 +39,7 @@ services:
       - no-new-privileges:true
     ports:
       - "${HTTP_PROXY_PORT:-8888}:8888/tcp"
+      - "${SOCKS5_PROXY_PORT:-1080}:1080/tcp"
     volumes:
       - ${OPENVPN_CONFIG_DIR:-./config}:/gluetun/source:ro
       - ${STATE_DIR:-./state}:/gluetun/state
@@ -53,6 +54,19 @@ services:
       HTTPPROXY_USER: ${HTTPPROXY_USER:-}
       HTTPPROXY_PASSWORD: ${HTTPPROXY_PASSWORD:-}
       HTTPPROXY_STEALTH: ${HTTPPROXY_STEALTH:-off}
+
+  vproxy:
+    image: ${VPROXY_IMAGE:-ghcr.io/0x676e67/vproxy:latest}
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_started
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      exec vproxy run --bind 0.0.0.0:1080 socks5
+      $${SOCKS5_USER:+-u "$${SOCKS5_USER}"}
+      $${SOCKS5_PASSWORD:+-p "$${SOCKS5_PASSWORD}"}
 
   ddns-watcher:
     image: ${WATCHER_IMAGE:-ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest}

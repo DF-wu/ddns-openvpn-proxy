@@ -29,6 +29,7 @@ source config (hostname-based)
     gluetun ── reads runtime config
         │       establishes VPN tunnel
         │       exposes HTTP proxy on :8888
+        │       exposes SOCKS5 proxy on :1080 (via vproxy sidecar)
         ▼
  ddns-watcher ── polls hostname periodically
                 compares with last-ip
@@ -123,6 +124,18 @@ If you enabled proxy auth:
 curl -x http://127.0.0.1:8888 -U USER:PASSWORD https://ifconfig.me
 ```
 
+Test the SOCKS5 proxy:
+
+```bash
+curl --socks5 127.0.0.1:1080 https://ifconfig.me
+```
+
+If you enabled SOCKS5 auth:
+
+```bash
+curl --socks5 127.0.0.1:1080 -U USER:PASSWORD https://ifconfig.me
+```
+
 ### 2. WireGuard
 
 Place your source profile under `config/wireguard/`:
@@ -180,6 +193,10 @@ docker compose up -d
 | `HTTPPROXY_USER` | *(empty)* | Proxy authentication username |
 | `HTTPPROXY_PASSWORD` | *(empty)* | Proxy authentication password |
 | `HTTPPROXY_STEALTH` | `off` | Hide proxy headers from upstream servers |
+| `SOCKS5_PROXY_PORT` | `1080` | Published port for the vproxy SOCKS5 sidecar |
+| `SOCKS5_USER` | *(empty)* | SOCKS5 proxy authentication username |
+| `SOCKS5_PASSWORD` | *(empty)* | SOCKS5 proxy authentication password |
+| `VPROXY_IMAGE` | `ghcr.io/0x676e67/vproxy:latest` | Image for the `vproxy` sidecar |
 | `GLUETUN_CONTAINER_NAME` | `ddns-openvpn-proxy` | Name of the Gluetun container to restart |
 | `WATCHER_IMAGE` | `ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest` | Image for `ddns-init` and `ddns-watcher` |
 | `GLUETUN_IMAGE` | `qmcgaw/gluetun:latest` | Gluetun image |
@@ -451,7 +468,6 @@ echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-s
 - **IPv4 only.** Gluetun's custom-config path only supports IPv4 endpoints.
 - **Single source profile.** Only one `.ovpn` or `.conf` file is auto-detected per source directory.
 - **First peer only for WireGuard.** If your WireGuard config has multiple `[Peer]` sections, only the first `Endpoint` line is monitored for DDNS changes. All matching Endpoints with the same hostname are updated together, but different hostnames on different peers are not tracked.
-- **HTTP proxy only.** No SOCKS5 proxy support.
 - **Docker socket required.** The watcher needs access to `/var/run/docker.sock` to restart Gluetun.
 - **Container restart on IP change.** The tunnel is torn down and rebuilt, causing a brief connectivity interruption.
 

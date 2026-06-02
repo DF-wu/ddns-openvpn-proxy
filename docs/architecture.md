@@ -48,6 +48,13 @@ This prevents Gluetun from starting before the runtime config exists.
 - rewrites the runtime config when the IP changes
 - restarts the Gluetun container through the Docker socket
 
+### `vproxy`
+
+- runs the `ghcr.io/0x676e67/vproxy` image as a sidecar
+- shares the Gluetun container's network namespace via `network_mode: service:gluetun`
+- exposes a SOCKS5 proxy on port `1080` that routes through the VPN tunnel
+- optional username/password authentication
+
 ## Data flow
 
 ### OpenVPN
@@ -65,7 +72,8 @@ state/openvpn/current.ovpn
      Gluetun
         │
         ├── OpenVPN tunnel
-        └── HTTP proxy :8888
+        ├── HTTP proxy :8888
+        └── SOCKS5 proxy :1080
 ```
 
 ### WireGuard
@@ -83,7 +91,8 @@ state/wireguard/wg0.conf
      Gluetun
         │
         ├── WireGuard tunnel
-        └── HTTP proxy :8888
+        ├── HTTP proxy :8888
+        └── SOCKS5 proxy :1080
 ```
 
 ## Multi-protocol dispatch layer
@@ -120,7 +129,6 @@ WireGuard configs use inlined keys (no external file references), so no path nor
 
 - IPv4 only
 - single source profile by default
-- HTTP proxy only
 - Docker socket access is required for `ddns-watcher`
 - no attempt to hot-swap the IP without reconnecting the tunnel
 
