@@ -65,6 +65,7 @@ endpoint_host="${endpoint_value%:*}"
 has_private_key=0
 peer_has_public_key=0
 in_peer=0
+in_interface=0
 
 while IFS= read -r line; do
   case "$line" in

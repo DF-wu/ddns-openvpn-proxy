@@ -40,8 +40,12 @@ detect_vpn_type() {
     return 0
   fi
 
-  local explicit_config="${OPENVPN_SOURCE_CONFIG:-${VPN_SOURCE_CONFIG:-}}"
-  if [[ -n "$explicit_config" ]]; then
+  local explicit_config
+  for explicit_config in "${VPN_SOURCE_CONFIG:-}" "${OPENVPN_SOURCE_CONFIG:-}" "${WIREGUARD_SOURCE_CONFIG:-}"; do
+    if [[ -z "$explicit_config" ]]; then
+      continue
+    fi
+
     case "$explicit_config" in
       *.ovpn)
         printf 'openvpn\n'
@@ -55,7 +59,7 @@ detect_vpn_type() {
         # Fall through to auto-detect — could be OpenVPN .conf
         ;;
     esac
-  fi
+  done
 
   local ovpn_dir="${OPENVPN_SOURCE_DIR:-./config/openvpn}"
   local wg_dir="${WIREGUARD_SOURCE_DIR:-./config/wireguard}"

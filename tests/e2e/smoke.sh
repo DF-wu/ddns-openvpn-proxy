@@ -33,6 +33,8 @@ export WATCH_ONCE=1
 
 if [[ "$vpn_type" == "wireguard" ]]; then
   cat >"$workdir/config/wireguard/wg0.conf" <<'EOF'
+# comment before interface
+
 [Interface]
 PrivateKey = test_private_key
 Address = 10.0.0.2/24
@@ -44,9 +46,10 @@ AllowedIPs = 0.0.0.0/0
 EOF
 
   export WIREGUARD_SOURCE_CONFIG="$workdir/config/wireguard/wg0.conf"
-  export WIREGUARD_SOURCE_DIR="$workdir/config/wireguard"
   export WIREGUARD_RENDERED_CONFIG="$workdir/state/wireguard/wg0.conf"
+  unset VPN_TYPE
 
+  "$repo_root/scripts/validate-wireguard-config.sh" "$WIREGUARD_SOURCE_CONFIG"
   "$repo_root/scripts/render-vpn-config.sh" "$WIREGUARD_SOURCE_CONFIG" "$WIREGUARD_RENDERED_CONFIG"
   grep -q 'Endpoint = 198.51.100.10:51820' "$WIREGUARD_RENDERED_CONFIG"
 

@@ -7,15 +7,19 @@ source "$repo_root/scripts/vpn-ddns-lib.sh"
 
 source_config="${1:-}"
 
+if [[ -n "$source_config" && ! -f "$source_config" ]]; then
+  source_config=""
+fi
+
+if [[ -n "$source_config" && -z "${VPN_SOURCE_CONFIG:-}" ]]; then
+  VPN_SOURCE_CONFIG="$source_config"
+fi
+
 vpn_type="${VPN_TYPE:-$(detect_vpn_type)}"
 if [[ "$vpn_type" == "wireguard" ]]; then
   output_config="${2:-${WIREGUARD_RENDERED_CONFIG:-${STATE_DIR:-./state}/wireguard/wg0.conf}}"
 else
   output_config="${2:-${OPENVPN_RENDERED_CONFIG:-${STATE_DIR:-./state}/openvpn/current.ovpn}}"
-fi
-
-if [[ -n "$source_config" && ! -f "$source_config" ]]; then
-  source_config=""
 fi
 
 if [[ -z "$source_config" ]]; then
