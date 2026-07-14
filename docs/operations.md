@@ -55,12 +55,42 @@ Recommended values:
 - `DDNS_INIT_RETRY_SECONDS=5`
 - `DDNS_INIT_MAX_ATTEMPTS=0` to keep retrying until the first render succeeds
 - `HTTP_PROXY_PORT=8888`
-- `HTTPPROXY_USER` and `HTTPPROXY_PASSWORD` if you want proxy auth
+- `HTTPPROXY_USER` and `HTTPPROXY_PASSWORD` if you want HTTP proxy authentication
 - `HTTPPROXY_STEALTH=off` unless you specifically need stealth mode
 - `SOCKS5_PROXY_PORT=1080`
-- `SOCKS5_USER` and `SOCKS5_PASSWORD` if you want SOCKS5 auth
+- `SOCKS5_USER` and `SOCKS5_PASSWORD` if you want SOCKS5 authentication; set both or neither
 - `VPROXY_IMAGE=ghcr.io/0x676e67/vproxy:latest`
 - `GLUETUN_CONTAINER_NAME=ddns-openvpn-proxy`
+
+The HTTP and SOCKS5 proxies are enabled simultaneously. Their credentials are
+independent, so reusing the same values is optional rather than required.
+
+For two authenticated proxies:
+
+```dotenv
+HTTP_PROXY_PORT=8888
+HTTPPROXY_USER=http-user
+HTTPPROXY_PASSWORD=replace-with-a-strong-http-password
+
+SOCKS5_PROXY_PORT=1080
+SOCKS5_USER=socks-user
+SOCKS5_PASSWORD=replace-with-a-strong-socks-password
+```
+
+For an unauthenticated SOCKS5 listener, leave both SOCKS5 values empty. Never
+set only one: `make validate-compose` rejects that configuration, and the
+sidecar also exits instead of silently opening an unauthenticated proxy if the
+preflight validation is bypassed.
+
+```dotenv
+SOCKS5_USER=
+SOCKS5_PASSWORD=
+```
+
+The Compose port mappings bind to all host interfaces by default. Use host and
+network firewall rules in addition to proxy authentication, especially if the
+host has a public address. Do not expose either proxy without authentication to
+the public Internet.
 
 ## Pull and start
 
@@ -70,6 +100,16 @@ Deploy after the `publish-watcher` workflow finishes for the commit you want to 
 docker compose pull
 docker compose up -d
 ```
+
+Verify that all long-running services are running:
+
+```bash
+docker compose ps gluetun vproxy ddns-watcher
+```
+
+`vproxy` may briefly start after Gluetun because `depends_on` controls startup
+order, not VPN health. If it is repeatedly restarting, inspect its logs before
+testing the listener.
 
 If the watcher package is private on GHCR, log in first:
 
@@ -93,6 +133,7 @@ You should see:
 
 - `ddns-init` logging the resolved IP and rendered config path
 - `gluetun` starting from the runtime config
+- `vproxy` remaining in the running state with its SOCKS5 listener on `:1080`
 - `ddns-watcher` logging `IP unchanged` until a DDNS update happens
 
 If DNS is not ready when the stack starts, `ddns-init` now keeps retrying instead of failing the stack immediately.
@@ -152,7 +193,31 @@ It should not. The compose file uses `WATCHER_IMAGE`, not `build:`. Run `docker 
 
 The published watcher image is `linux/amd64` only. If your host is `arm64`, either change the publish workflow to multi-arch or deploy on an amd64 machine.
 
-### Proxy port is reachable but traffic does not pass
+### Test both proxies
+
+Use the same destination for both tests. Once the VPN is healthy, both commands
+should report the VPN exit address:
+
+```bash
+curl -x http://127.0.0.1:8888 https://ifconfig.me
+curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
+```
+
+For authenticated listeners:
+
+```bash
+curl -x http://127.0.0.1:8888 -U HTTP_USER:HTTP_PASSWORD https://ifconfig.me
+curl --socks5-hostname 127.0.0.1:1080 -U SOCKS_USER:SOCKS_PASSWORD https://ifconfig.me
+```
+
+Prefer `--socks5-hostname` over `--socks5`: it asks the SOCKS5 server to resolve
+the destination hostname and avoids a client-side DNS lookup outside the proxy
+path.
+
+To connect from another machine, replace `127.0.0.1` with the Docker host's IP
+address and allow only the required source network through the host firewall.
+
+### HTTP proxy port is reachable but traffic does not pass
 
 That usually means the HTTP proxy is up but the tunnel is not healthy. Inspect Gluetun logs first.
 
@@ -160,19 +225,55 @@ That usually means the HTTP proxy is up but the tunnel is not healthy. Inspect G
 
 If you enabled `HTTPPROXY_USER` and `HTTPPROXY_PASSWORD`, confirm your client is sending credentials to the proxy. For curl, use `-U USER:PASSWORD`.
 
-### SOCKS5 proxy testing
+### SOCKS5 sidecar is restarting
 
-Test the SOCKS5 proxy:
-
-```bash
-curl --socks5 127.0.0.1:1080 https://ifconfig.me
-```
-
-If you enabled SOCKS5 authentication:
+Read the sidecar log:
 
 ```bash
-curl --socks5 127.0.0.1:1080 -U USER:PASSWORD https://ifconfig.me
+docker compose ps vproxy
+docker compose logs vproxy
 ```
+
+If the log reports that `SOCKS5_USER` and `SOCKS5_PASSWORD` must both be set or
+both be empty, correct `.env` and recreate the sidecar:
+
+```bash
+docker compose up -d --force-recreate vproxy
+```
+
+This failure is intentional and fail-closed. It prevents a typo in one
+credential from producing an unauthenticated proxy.
+
+### SOCKS5 sidecar is running but port 1080 is unreachable
+
+Confirm the rendered Compose contract:
+
+```bash
+docker compose config | grep -E 'network_mode: service:gluetun|target: 1080|FIREWALL_INPUT_PORTS'
+```
+
+The output must show that `vproxy` shares `service:gluetun`, TCP container port
+`1080` is published, and Gluetun permits `FIREWALL_INPUT_PORTS: "1080"`. The
+firewall setting is required because Gluetun cannot automatically discover a
+listener launched by a sidecar.
+
+Then confirm the listener and check both relevant logs:
+
+```bash
+docker compose exec gluetun sh -c 'netstat -lnt 2>/dev/null | grep :1080'
+docker compose logs gluetun vproxy
+```
+
+`SOCKS5_PROXY_PORT` is the host-side port only. If you set it to `2080`, clients
+connect to host port `2080`, while `vproxy` and Gluetun's firewall continue to
+use container port `1080`.
+
+### SOCKS5 UDP does not work
+
+This deployment publishes TCP only and supports SOCKS5 `CONNECT`. It does not
+publish the dynamically allocated UDP listener used by SOCKS5 `UDP ASSOCIATE`.
+Applications that require UDP through SOCKS5 are outside the current supported
+contract.
 
 ### Docker socket exposure
 

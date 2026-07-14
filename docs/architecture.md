@@ -38,6 +38,8 @@ This prevents Gluetun from starting before the runtime config exists.
 - OpenVPN: uses `OPENVPN_CUSTOM_CONFIG`
 - WireGuard: uses `WIREGUARD_CUSTOM_CONFIG`
 - exposes Gluetun's built-in HTTP proxy on port `8888`
+- publishes host TCP ports for both HTTP (`8888`) and SOCKS5 (`1080`)
+- allows the sidecar's fixed container port `1080` through its firewall with `FIREWALL_INPUT_PORTS`
 - is restarted by the watcher when the rendered remote IP changes
 
 ### `ddns-watcher`
@@ -52,8 +54,38 @@ This prevents Gluetun from starting before the runtime config exists.
 
 - runs the `ghcr.io/0x676e67/vproxy` image as a sidecar
 - shares the Gluetun container's network namespace via `network_mode: service:gluetun`
-- exposes a SOCKS5 proxy on port `1080` that routes through the VPN tunnel
-- optional username/password authentication
+- listens on `0.0.0.0:1080` inside that shared namespace, so outbound connections use the VPN tunnel
+- supports optional username/password authentication; both values must be set together
+- refuses to start if only one authentication value is present, preventing an accidental open proxy
+
+The `vproxy` service has no `ports` section of its own. Docker requires the port
+publication on `gluetun` because `network_mode: service:gluetun` makes both
+services use Gluetun's network namespace. Gluetun does not automatically know
+about listeners started by sidecars, so `FIREWALL_INPUT_PORTS=1080` is also
+required. `SOCKS5_PROXY_PORT` changes only the host-side port; the shared
+namespace always uses container port `1080`.
+
+The Compose command is an argv list containing one multi-line script. This is
+intentional: `/bin/sh -c` must receive the entire authentication decision as one
+argument. A scalar Compose command is tokenized at shell operators and can be
+truncated before `vproxy` is invoked.
+
+## Proxy traffic flow
+
+HTTP and SOCKS5 are active simultaneously and have separate credentials:
+
+```text
+HTTP client ── host:8888 ──► Gluetun HTTP proxy ──┐
+                                                  ├──► VPN tunnel ──► Internet
+SOCKS5 client ─ host:1080 ─► vproxy sidecar ──────┘
+                                │
+                                └── shared Gluetun network namespace
+```
+
+The stack publishes TCP ports only. HTTP proxy traffic and SOCKS5 `CONNECT`
+traffic are supported. Although the upstream vproxy implementation understands
+UDP `ASSOCIATE`, its dynamically allocated UDP listener is not published by
+this Compose deployment, so UDP proxying is outside the supported contract.
 
 ## Data flow
 
@@ -69,11 +101,11 @@ source .ovpn with hostname
 state/openvpn/current.ovpn
         │
         ▼
-     Gluetun
+ shared Gluetun network namespace
         │
         ├── OpenVPN tunnel
-        ├── HTTP proxy :8888
-        └── SOCKS5 proxy :1080
+        ├── Gluetun HTTP proxy :8888
+        └── vproxy SOCKS5 proxy :1080
 ```
 
 ### WireGuard
@@ -88,11 +120,11 @@ source .conf with hostname in Endpoint
 state/wireguard/wg0.conf
         │
         ▼
-     Gluetun
+ shared Gluetun network namespace
         │
         ├── WireGuard tunnel
-        ├── HTTP proxy :8888
-        └── SOCKS5 proxy :1080
+        ├── Gluetun HTTP proxy :8888
+        └── vproxy SOCKS5 proxy :1080
 ```
 
 ## Multi-protocol dispatch layer
@@ -131,6 +163,8 @@ WireGuard configs use inlined keys (no external file references), so no path nor
 - single source profile by default
 - Docker socket access is required for `ddns-watcher`
 - no attempt to hot-swap the IP without reconnecting the tunnel
+- proxy listeners are published on all host interfaces unless the Compose port mappings are restricted
+- SOCKS5 UDP `ASSOCIATE` is not exposed; the supported SOCKS5 data path is TCP `CONNECT`
 
 ## Extension point: adding a new VPN type
 

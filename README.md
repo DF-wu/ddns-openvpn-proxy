@@ -39,6 +39,10 @@ source config (hostname-based)
                 restarts gluetun container
 ```
 
+The HTTP and SOCKS5 proxies run at the same time. They are separate listeners
+with separate authentication settings, but both use Gluetun's network namespace
+and therefore send outbound connections through the selected VPN tunnel.
+
 ### Why four services instead of one
 
 **Gluetun is already solved.** The `qmcgaw/gluetun` image handles OpenVPN, WireGuard, firewall rules, HTTP proxying, and health checks. Reimplementing any of that would be a bug farm. This stack treats Gluetun as a black-box tunnel service and adds only the DDNS orchestration it does not provide.
@@ -98,6 +102,7 @@ At minimum, set these:
 VPN_TYPE=openvpn
 DDNS_HOSTNAME=vpn.example.com   # optional if parsed from the remote line
 HTTP_PROXY_PORT=8888
+SOCKS5_PROXY_PORT=1080
 ```
 
 Validate everything before starting:
@@ -114,7 +119,13 @@ docker compose pull
 docker compose up -d
 ```
 
-Test the proxy:
+Confirm all long-running services are up:
+
+```bash
+docker compose ps gluetun vproxy ddns-watcher
+```
+
+Test the HTTP proxy:
 
 ```bash
 curl -x http://127.0.0.1:8888 https://ifconfig.me
@@ -129,13 +140,16 @@ curl -x http://127.0.0.1:8888 -U USER:PASSWORD https://ifconfig.me
 Test the SOCKS5 proxy:
 
 ```bash
-curl --socks5 127.0.0.1:1080 https://ifconfig.me
+curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
 ```
+
+`--socks5-hostname` asks the proxy to resolve the destination hostname, which
+avoids resolving it outside the VPN path on the client.
 
 If you enabled SOCKS5 auth:
 
 ```bash
-curl --socks5 127.0.0.1:1080 -U USER:PASSWORD https://ifconfig.me
+curl --socks5-hostname 127.0.0.1:1080 -U USER:PASSWORD https://ifconfig.me
 ```
 
 ### 2. WireGuard
@@ -160,6 +174,7 @@ Set your environment:
 VPN_TYPE=wireguard
 DDNS_HOSTNAME=vpn.example.com   # optional if parsed from the Endpoint line
 HTTP_PROXY_PORT=8888
+SOCKS5_PROXY_PORT=1080
 ```
 
 Validate and start:
@@ -191,17 +206,57 @@ docker compose up -d
 | `DDNS_INIT_MAX_ATTEMPTS` | `0` | Max init retries. `0` means retry forever |
 | `DDNS_RESOLVER` | *(container default)* | Custom DNS resolver IP for hostname lookups |
 | `DDNS_OVERRIDE_IP` | *(empty)* | **Test only.** Hardcodes the resolved IP |
-| `HTTP_PROXY_PORT` | `8888` | Published port for Gluetun's HTTP proxy |
-| `HTTPPROXY_USER` | *(empty)* | Proxy authentication username |
-| `HTTPPROXY_PASSWORD` | *(empty)* | Proxy authentication password |
+| `HTTP_PROXY_PORT` | `8888` | Host TCP port published for Gluetun's HTTP proxy; the container port stays `8888` |
+| `HTTPPROXY_USER` | *(empty)* | HTTP proxy authentication username |
+| `HTTPPROXY_PASSWORD` | *(empty)* | HTTP proxy authentication password |
 | `HTTPPROXY_STEALTH` | `off` | Hide proxy headers from upstream servers |
-| `SOCKS5_PROXY_PORT` | `1080` | Published port for the vproxy SOCKS5 sidecar |
-| `SOCKS5_USER` | *(empty)* | SOCKS5 proxy authentication username |
-| `SOCKS5_PASSWORD` | *(empty)* | SOCKS5 proxy authentication password |
+| `SOCKS5_PROXY_PORT` | `1080` | Host TCP port published for the vproxy SOCKS5 sidecar; the container port stays `1080` |
+| `SOCKS5_USER` | *(empty)* | SOCKS5 authentication username; set together with `SOCKS5_PASSWORD` |
+| `SOCKS5_PASSWORD` | *(empty)* | SOCKS5 authentication password; set together with `SOCKS5_USER` |
 | `VPROXY_IMAGE` | `ghcr.io/0x676e67/vproxy:latest` | Image for the `vproxy` sidecar |
 | `GLUETUN_CONTAINER_NAME` | `ddns-openvpn-proxy` | Name of the Gluetun container to restart |
 | `WATCHER_IMAGE` | `ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest` | Image for `ddns-init` and `ddns-watcher` |
 | `GLUETUN_IMAGE` | `qmcgaw/gluetun:latest` | Gluetun image |
+
+### Running HTTP and SOCKS5 together
+
+Both proxies are enabled by the default Compose file and can be used
+simultaneously:
+
+| Proxy | Host port | Implementation | Authentication variables | VPN path |
+|-------|-----------|----------------|--------------------------|----------|
+| HTTP | `HTTP_PROXY_PORT` (`8888`) | Gluetun built-in HTTP proxy | `HTTPPROXY_USER`, `HTTPPROXY_PASSWORD` | Gluetun VPN tunnel |
+| SOCKS5 | `SOCKS5_PROXY_PORT` (`1080`) | `vproxy` sidecar | `SOCKS5_USER`, `SOCKS5_PASSWORD` | Shared Gluetun network namespace and VPN tunnel |
+
+The published SOCKS5 port belongs to the `gluetun` service because `vproxy`
+uses `network_mode: service:gluetun`; the two containers have one network
+namespace and one set of listening ports. Gluetun is configured with
+`FIREWALL_INPUT_PORTS=1080` so its firewall accepts connections to the sidecar.
+This is the fixed container-side port and is independent from the configurable
+host-side `SOCKS5_PROXY_PORT`.
+
+HTTP and SOCKS5 credentials are independent. The SOCKS5 combinations behave as
+follows:
+
+| `SOCKS5_USER` | `SOCKS5_PASSWORD` | Result |
+|---------------|-------------------|--------|
+| empty | empty | SOCKS5 starts without authentication |
+| set | set | SOCKS5 starts and requires those credentials |
+| set | empty | Invalid; Compose validation fails and `vproxy` refuses to start |
+| empty | set | Invalid; Compose validation fails and `vproxy` refuses to start |
+
+The fail-closed partial-credential behavior prevents an intended authenticated
+proxy from silently becoming an open proxy. `make validate-compose` catches the
+mistake before deployment; the container startup check provides a second layer
+if validation is bypassed.
+
+Docker's `HOST_PORT:CONTAINER_PORT` syntax publishes both proxies on all host
+interfaces by default. Restrict access with proxy credentials, the host
+firewall, and upstream network firewall rules. Do not expose an
+unauthenticated proxy to the public Internet.
+
+The Compose stack publishes TCP only. SOCKS5 `CONNECT` traffic is supported;
+SOCKS5 UDP `ASSOCIATE` is not exposed by this deployment.
 
 ### Auto-detection rules
 
@@ -345,10 +400,10 @@ Update `tests/e2e/smoke.sh` to exercise the new protocol with a dummy config and
 Check your local config before starting the stack:
 
 ```bash
-make validate-repo       # Validate example configs (OpenVPN + WireGuard)
+make validate-repo       # Validate both example configs and Compose contract
 make validate-config     # Validate your own config
 make validate-compose    # Validate docker-compose.yml rendering
-make validate            # All of the above
+make validate            # Validate your selected config and Compose contract
 ```
 
 ### Smoke tests
@@ -420,7 +475,7 @@ It should not. The compose file uses `image:`, not `build:`. Run `docker compose
 
 The published watcher image is `linux/amd64` only. If your host is ARM, either modify the publish workflow for multi-arch builds or deploy on an amd64 machine.
 
-### Proxy port is reachable but traffic does not pass
+### HTTP proxy is reachable but traffic does not pass
 
 The HTTP proxy is up, but the tunnel is not healthy. Inspect Gluetun logs first:
 
@@ -434,6 +489,36 @@ If you set `HTTPPROXY_USER` and `HTTPPROXY_PASSWORD`, your client must send cred
 
 ```bash
 curl -x http://127.0.0.1:8888 -U USER:PASSWORD https://ifconfig.me
+```
+
+### SOCKS5 does not start or accept connections
+
+Check the sidecar status and logs first:
+
+```bash
+docker compose ps vproxy
+docker compose logs vproxy
+```
+
+If the log says that `SOCKS5_USER` and `SOCKS5_PASSWORD` must both be set or
+both be empty, correct `.env` and recreate the sidecar:
+
+```bash
+docker compose up -d --force-recreate vproxy
+```
+
+If `vproxy` is running but the port cannot be reached, confirm the rendered
+Compose config contains the shared network namespace, the port publication, and
+Gluetun's firewall allowance:
+
+```bash
+docker compose config | grep -E 'network_mode: service:gluetun|target: 1080|FIREWALL_INPUT_PORTS'
+```
+
+For an authenticated SOCKS5 proxy, test with:
+
+```bash
+curl --socks5-hostname 127.0.0.1:1080 -U USER:PASSWORD https://ifconfig.me
 ```
 
 ### Docker socket exposure
@@ -472,6 +557,8 @@ echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-s
 - **First peer only for WireGuard.** If your WireGuard config has multiple `[Peer]` sections, only the first `Endpoint` line is monitored for DDNS changes. All matching Endpoints with the same hostname are updated together, but different hostnames on different peers are not tracked.
 - **Docker socket required.** The watcher needs access to `/var/run/docker.sock` to restart Gluetun.
 - **Container restart on IP change.** The tunnel is torn down and rebuilt, causing a brief connectivity interruption.
+- **SOCKS5 TCP only.** The deployment supports SOCKS5 `CONNECT`; it does not publish the dynamic UDP listener needed for UDP `ASSOCIATE`.
+- **Published proxy ports require protection.** Docker publishes `8888` and `1080` on all host interfaces by default. Use authentication and firewall rules on untrusted networks.
 
 ---
 

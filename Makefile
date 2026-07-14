@@ -9,7 +9,7 @@ help:
 	  'make validate-openvpn-config Validate ./config/openvpn/ (or pass CONFIG=...)' \
 	  'make validate-wireguard-config Validate ./config/wireguard/ (or pass CONFIG=...)' \
 	  'make validate-compose        Validate docker-compose.yml with example inputs' \
-	  'make validate-repo           Validate both example configs' \
+	  'make validate-repo           Validate example configs and Compose contract' \
 	  'make up                      Start the DDNS-aware Gluetun stack' \
 	  'make down                    Stop the stack' \
 	  'make logs                    Tail the Gluetun and DDNS watcher logs' \
@@ -22,6 +22,7 @@ validate: validate-config validate-compose
 validate-repo:
 	@$(MAKE) validate-openvpn-config CONFIG=./examples/openvpn/custom.ovpn
 	@$(MAKE) validate-wireguard-config CONFIG=./examples/wireguard/wg0.conf
+	@$(MAKE) validate-compose
 
 validate-config:
 	@scripts/validate-vpn-config.sh "$(CONFIG)"

@@ -54,6 +54,9 @@ services:
       HTTPPROXY_USER: ${HTTPPROXY_USER:-}
       HTTPPROXY_PASSWORD: ${HTTPPROXY_PASSWORD:-}
       HTTPPROXY_STEALTH: ${HTTPPROXY_STEALTH:-off}
+      # vproxy shares this network namespace, so Gluetun must explicitly allow
+      # the sidecar's listener through its firewall on the default interface.
+      FIREWALL_INPUT_PORTS: "1080"
 
   vproxy:
     image: ${VPROXY_IMAGE:-ghcr.io/0x676e67/vproxy:latest}
@@ -62,13 +65,22 @@ services:
       gluetun:
         condition: service_started
     restart: unless-stopped
+    environment:
+      SOCKS5_USER: ${SOCKS5_USER:-}
+      SOCKS5_PASSWORD: ${SOCKS5_PASSWORD:-}
     entrypoint: ["/bin/sh", "-c"]
-    command: |
-      if [ -n "$${SOCKS5_USER}" ] && [ -n "$${SOCKS5_PASSWORD}" ]; then
-        exec vproxy run --bind 0.0.0.0:1080 socks5 -u "$${SOCKS5_USER}" -p "$${SOCKS5_PASSWORD}"
-      else
-        exec vproxy run --bind 0.0.0.0:1080 socks5
-      fi
+    # Keep the script as one argv item for `sh -c`. A scalar command is split
+    # by Compose at shell operators such as &&, truncating this script.
+    command:
+      - |
+        if [ -n "$${SOCKS5_USER}" ] && [ -n "$${SOCKS5_PASSWORD}" ]; then
+          exec vproxy run --bind 0.0.0.0:1080 socks5 -u "$${SOCKS5_USER}" -p "$${SOCKS5_PASSWORD}"
+        elif [ -z "$${SOCKS5_USER}" ] && [ -z "$${SOCKS5_PASSWORD}" ]; then
+          exec vproxy run --bind 0.0.0.0:1080 socks5
+        else
+          echo "ERROR: SOCKS5_USER and SOCKS5_PASSWORD must both be set or both be empty" >&2
+          exit 64
+        fi
 
   ddns-watcher:
     image: ${WATCHER_IMAGE:-ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest}
