@@ -5,7 +5,7 @@ SHELL := /bin/sh
 help:
 	@printf '%s\n' \
 	  'make check      Run every repository validation and test' \
-	  'make validate   Validate Compose plus your mounted OpenVPN profile' \
+	  'make validate   Validate Compose plus your selected VPN profile' \
 	  'make up         Validate, pull, and start the production stack' \
 	  'make status     Show service and DDNS runtime status' \
 	  'make logs       Follow VPN, proxy, and DDNS logs' \

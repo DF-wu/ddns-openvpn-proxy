@@ -1,13 +1,14 @@
 #!/bin/sh
 set -eu
 
-# DDNS-to-Gluetun adapter. This is deliberately POSIX shell so the repository
-# can run it from the stock docker:cli image without installing packages or
-# building a project-specific image.
+# DDNS-to-Gluetun adapter for OpenVPN and WireGuard. This is deliberately POSIX
+# shell so the repository can run it from the stock docker:cli image without
+# installing packages or building a project-specific image.
 
 state_dir=${STATE_DIR:-/state}
-source_config=${OPENVPN_SOURCE_CONFIG:-/source/client.ovpn}
-rendered_config=${OPENVPN_RENDERED_CONFIG:-$state_dir/openvpn/client.ovpn}
+vpn_type=${VPN_TYPE:-openvpn}
+source_config=${VPN_SOURCE_CONFIG:-${OPENVPN_SOURCE_CONFIG:-/source/client.ovpn}}
+rendered_config=${VPN_RENDERED_CONFIG:-${OPENVPN_RENDERED_CONFIG:-$state_dir/runtime/vpn.conf}}
 last_ip_file=$state_dir/ddns/last-ip
 source_hash_file=$state_dir/ddns/source.sha256
 heartbeat_file=$state_dir/ddns/watcher-heartbeat
@@ -99,10 +100,15 @@ validate_relative_references() {
   done
 }
 
-validate_config() {
-  [ -f "$source_config" ] || die "OpenVPN profile not found: $source_config"
-  [ -r "$source_config" ] || die "OpenVPN profile is not readable: $source_config"
-  [ -s "$source_config" ] || die "OpenVPN profile is empty: $source_config"
+validate_source_file() {
+  profile_name=$1
+  [ -f "$source_config" ] || die "$profile_name profile not found: $source_config"
+  [ -r "$source_config" ] || die "$profile_name profile is not readable: $source_config"
+  [ -s "$source_config" ] || die "$profile_name profile is empty: $source_config"
+}
+
+validate_openvpn_config() {
+  validate_source_file OpenVPN
 
   remote_count=$(awk '
     /^[[:space:]]*[#;]/ { next }
@@ -167,6 +173,93 @@ validate_config() {
     fi
   fi
 
+  validate_relative_references
+}
+
+validate_wireguard_config() {
+  validate_source_file WireGuard
+
+  wireguard_endpoint=$(awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+
+    function invalid(message) {
+      print "WireGuard profile " message > "/dev/stderr"
+      failed = 1
+    }
+
+    /^[[:space:]]*([#;]|$)/ { next }
+
+    /^[[:space:]]*\[/ {
+      heading = trim($0)
+      if (heading == "[Interface]") {
+        section = "interface"
+        interface_count++
+      } else if (heading == "[Peer]") {
+        section = "peer"
+        peer_count++
+      } else {
+        section = "other"
+      }
+      next
+    }
+
+    {
+      line = $0
+      sub(/[[:space:]]+[#;].*$/, "", line)
+      separator = index(line, "=")
+      if (separator == 0) next
+      key = trim(substr(line, 1, separator - 1))
+      value = trim(substr(line, separator + 1))
+
+      if (section == "interface" && key == "PrivateKey") {
+        private_key_count++
+        if (value == "") invalid("has an empty Interface PrivateKey")
+      } else if (section == "interface" && key == "Address") {
+        address_count++
+        if (value == "") invalid("has an empty Interface Address")
+      } else if (section == "peer" && key == "PublicKey") {
+        public_key_count++
+        if (value == "") invalid("has an empty Peer PublicKey")
+      } else if (section == "peer" && key == "Endpoint") {
+        endpoint_count++
+        endpoint = value
+      }
+    }
+
+    END {
+      if (interface_count != 1) invalid("must contain exactly one [Interface] section")
+      if (peer_count != 1) invalid("must contain exactly one [Peer] section")
+      if (private_key_count != 1) invalid("must contain exactly one Interface PrivateKey")
+      if (address_count != 1) invalid("must contain exactly one Interface Address")
+      if (public_key_count != 1) invalid("must contain exactly one Peer PublicKey")
+      if (endpoint_count != 1) invalid("must contain exactly one Peer Endpoint")
+      if (failed) exit 1
+      print endpoint
+    }
+  ' "$source_config") || die "invalid WireGuard profile: $source_config"
+
+  case $wireguard_endpoint in
+    *:*:*) die "WireGuard Endpoint must use a hostname and one port: $wireguard_endpoint" ;;
+    *:*) ;;
+    *) die "WireGuard Endpoint must be HOST:PORT: $wireguard_endpoint" ;;
+  esac
+
+  remote_source_host=${wireguard_endpoint%:*}
+  remote_port=${wireguard_endpoint##*:}
+  validate_hostname "$remote_source_host" ||
+    die "invalid WireGuard Endpoint hostname: $remote_source_host"
+  is_uint "$remote_port" || die "WireGuard Endpoint port is not numeric: $remote_port"
+  if ! { [ "$remote_port" -ge 1 ] && [ "$remote_port" -le 65535 ]; }; then
+    die "WireGuard Endpoint port must be between 1 and 65535: $remote_port"
+  fi
+}
+
+validate_common_environment() {
+
   validate_configured_pair OPENVPN \
     "${OPENVPN_USER_CONFIGURED:-0}" "${OPENVPN_PASSWORD_CONFIGURED:-0}"
   validate_configured_pair HTTPPROXY \
@@ -219,8 +312,15 @@ validate_config() {
   case $gluetun_container in
     ''|-*|*[!A-Za-z0-9_.-]*) die "invalid GLUETUN_CONTAINER_NAME: $gluetun_container" ;;
   esac
+}
 
-  validate_relative_references
+validate_config() {
+  case $vpn_type in
+    openvpn) validate_openvpn_config ;;
+    wireguard) validate_wireguard_config ;;
+    *) die "VPN_TYPE must be openvpn or wireguard: $vpn_type" ;;
+  esac
+  validate_common_environment
 }
 
 filter_ipv4s() {
@@ -277,6 +377,11 @@ write_state() {
 }
 
 source_hash() {
+  if [ "$vpn_type" = wireguard ]; then
+    sha256sum "$source_config" | awk '{ print $1 }'
+    return
+  fi
+
   source_parent=$(dirname "$source_config")
   tab=$(printf '\t')
 
@@ -310,7 +415,7 @@ select_ip() {
   printf '%s\n' "$addresses" | sed -n '1p'
 }
 
-render_config() {
+render_openvpn_config() {
   resolved_ip=$1
   output_parent=$(dirname "$rendered_config")
   source_parent=$(dirname "$source_config")
@@ -342,6 +447,53 @@ render_config() {
   mv -f "$temporary" "$rendered_config"
 }
 
+render_wireguard_config() {
+  resolved_ip=$1
+  output_parent=$(dirname "$rendered_config")
+  mkdir -p "$output_parent"
+  temporary=$(mktemp "$output_parent/.wg0.conf.XXXXXX")
+
+  awk -v ip="$resolved_ip" '
+    /^[[:space:]]*\[/ {
+      section = $0
+      sub(/^[[:space:]]+/, "", section)
+      sub(/[[:space:]]+$/, "", section)
+      print
+      next
+    }
+
+    section == "[Peer]" && /^[[:space:]]*Endpoint[[:space:]]*=/ {
+      match($0, /^[[:space:]]*Endpoint[[:space:]]*=[[:space:]]*/)
+      prefix = substr($0, 1, RLENGTH)
+      remainder = substr($0, RLENGTH + 1)
+      comment = ""
+      if (match(remainder, /[[:space:]]+[#;]/)) {
+        comment = substr(remainder, RSTART)
+        remainder = substr(remainder, 1, RSTART - 1)
+      }
+      sub(/^[[:space:]]+/, "", remainder)
+      sub(/[[:space:]]+$/, "", remainder)
+      separator = index(remainder, ":")
+      port = substr(remainder, separator + 1)
+      print prefix ip ":" port comment
+      next
+    }
+
+    { print }
+  ' "$source_config" > "$temporary"
+
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$rendered_config"
+}
+
+render_config() {
+  resolved_ip=$1
+  case $vpn_type in
+    openvpn) render_openvpn_config "$resolved_ip" ;;
+    wireguard) render_wireguard_config "$resolved_ip" ;;
+  esac
+}
+
 touch_heartbeat() {
   write_state "$(date -u '+%s')" "$heartbeat_file"
 }
@@ -355,7 +507,7 @@ resolve_and_select() {
 
 initialize() {
   validate_config
-  log INFO "initializing hostname=$ddns_hostname profile=$source_config"
+  log INFO "initializing vpn_type=$vpn_type hostname=$ddns_hostname profile=$source_config"
 
   while :; do
     previous_ip=$(read_state "$last_ip_file" || true)
@@ -363,7 +515,7 @@ initialize() {
       render_config "$selected_ip"
       write_state "$selected_ip" "$last_ip_file"
       write_state "$(source_hash)" "$source_hash_file"
-      log INFO "rendered profile hostname=$ddns_hostname ip=$selected_ip output=$rendered_config"
+      log INFO "rendered profile vpn_type=$vpn_type hostname=$ddns_hostname ip=$selected_ip output=$rendered_config"
       return 0
     fi
 
@@ -401,7 +553,7 @@ watch_once() {
   if restart_gluetun; then
     write_state "$selected_ip" "$last_ip_file"
     write_state "$current_hash" "$source_hash_file"
-    log INFO "restarted Gluetun reason=$reason hostname=$ddns_hostname old_ip=${previous_ip:-none} new_ip=$selected_ip"
+    log INFO "restarted Gluetun vpn_type=$vpn_type reason=$reason hostname=$ddns_hostname old_ip=${previous_ip:-none} new_ip=$selected_ip"
     return 0
   fi
 
@@ -436,8 +588,8 @@ usage() {
 Usage: ddns-openvpn.sh COMMAND
 
 Commands:
-  validate     Validate the source OpenVPN profile and environment
-  render IP    Render the Gluetun-compatible profile with IP
+  validate     Validate the selected OpenVPN or WireGuard profile and environment
+  render IP    Render the Gluetun-compatible runtime profile with IP
   init         Resolve DDNS and render the initial runtime profile
   watch        Poll DDNS, render changes, and restart Gluetun
   watch-once   Run one watcher iteration (primarily for diagnostics/tests)
@@ -449,7 +601,7 @@ command=${1:-}
 case $command in
   validate)
     validate_config
-    log INFO "configuration valid hostname=$ddns_hostname profile=$source_config"
+    log INFO "configuration valid vpn_type=$vpn_type hostname=$ddns_hostname profile=$source_config"
     ;;
   render)
     validate_config

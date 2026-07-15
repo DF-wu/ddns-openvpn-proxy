@@ -65,13 +65,37 @@ EOF
   printf '%s\n' "$fixture"
 }
 
+new_wireguard_fixture() {
+  fixture=$(new_fixture "$1")
+  cat > "$fixture/source/wg0.conf" <<'EOF'
+[Interface]
+PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+Address = 10.0.0.2/32
+
+[Peer]
+PublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=
+PresharedKey = CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=
+Endpoint = vpn.example.test:51820 # DDNS endpoint
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+EOF
+  printf '%s\n' "$fixture"
+}
+
 run_subject() {
   fixture=$1
   shift
+  vpn_type_value=${VPN_TYPE:-openvpn}
+  case $vpn_type_value in
+    openvpn) source_name=client.ovpn ;;
+    wireguard) source_name=wg0.conf ;;
+    *) source_name=client.ovpn ;;
+  esac
   PATH="$fixture/bin:$PATH" \
   STATE_DIR="$fixture/state" \
-  OPENVPN_SOURCE_CONFIG="$fixture/source/client.ovpn" \
-  OPENVPN_RENDERED_CONFIG="$fixture/state/openvpn/client.ovpn" \
+  VPN_TYPE="$vpn_type_value" \
+  VPN_SOURCE_CONFIG="$fixture/source/$source_name" \
+  VPN_RENDERED_CONFIG="$fixture/state/runtime/vpn.conf" \
   DDNS_POLL_SECONDS=10 \
   DDNS_INIT_RETRY_SECONDS=1 \
   DDNS_HOSTNAME="${DDNS_HOSTNAME:-}" \
@@ -101,14 +125,14 @@ pass 'valid profile and environment are accepted'
 
 fixture=$(new_fixture render)
 DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" render 198.51.100.10
-assert_contains 'remote 198.51.100.10 1194 udp # DDNS endpoint' "$fixture/state/openvpn/client.ovpn"
-assert_contains "ca $fixture/source/ca.crt" "$fixture/state/openvpn/client.ovpn"
+assert_contains 'remote 198.51.100.10 1194 udp # DDNS endpoint' "$fixture/state/runtime/vpn.conf"
+assert_contains "ca $fixture/source/ca.crt" "$fixture/state/runtime/vpn.conf"
 pass 'renderer writes IP and absolute referenced-file paths'
 
 fixture=$(new_fixture init)
 DDNS_OVERRIDE_IPS='198.51.100.11,198.51.100.10' run_subject "$fixture" init >/dev/null
 assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" 'init chooses a deterministic address'
-assert_contains 'remote 198.51.100.10 1194 udp' "$fixture/state/openvpn/client.ovpn"
+assert_contains 'remote 198.51.100.10 1194 udp' "$fixture/state/runtime/vpn.conf"
 pass 'init sorts multiple A records and seeds runtime state'
 
 fixture=$(new_fixture default_resolver)
@@ -146,7 +170,7 @@ pass 'transient DNS failure preserves the active tunnel'
 fixture=$(new_fixture address_change)
 DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
 DDNS_OVERRIDE_IPS=198.51.100.20 run_subject "$fixture" watch-once >/dev/null
-assert_contains 'remote 198.51.100.20 1194 udp' "$fixture/state/openvpn/client.ovpn"
+assert_contains 'remote 198.51.100.20 1194 udp' "$fixture/state/runtime/vpn.conf"
 assert_contains 'container restart --timeout 5 -- gluetun-test' "$fixture/docker.log"
 assert_equals '198.51.100.20' "$(cat "$fixture/state/ddns/last-ip")" 'changed address is committed'
 pass 'DDNS address change atomically renders and restarts Gluetun'
@@ -211,5 +235,99 @@ PROXY_BIND_ADDRESS=0.0.0.0 \
   SOCKS5_USER=socks-user SOCKS5_PASSWORD=socks-password \
   DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" validate >/dev/null
 pass 'direct Compose helper gate enforces proxy exposure policy'
+
+fixture=$(new_wireguard_fixture wireguard_validate)
+VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" validate >/dev/null
+pass 'valid WireGuard profile and environment are accepted'
+
+fixture=$(new_wireguard_fixture wireguard_render)
+cat >> "$fixture/source/wg0.conf" <<'EOF'
+
+[Metadata]
+Endpoint = do-not-rewrite.example.test:1234
+EOF
+VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" render 198.51.100.10
+assert_contains 'Endpoint = 198.51.100.10:51820 # DDNS endpoint' \
+  "$fixture/state/runtime/vpn.conf"
+assert_contains 'PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' \
+  "$fixture/state/runtime/vpn.conf"
+assert_contains 'Endpoint = do-not-rewrite.example.test:1234' \
+  "$fixture/state/runtime/vpn.conf"
+pass 'WireGuard renderer replaces only the endpoint hostname'
+
+fixture=$(new_wireguard_fixture wireguard_init)
+VPN_TYPE=wireguard DDNS_OVERRIDE_IPS='198.51.100.12,198.51.100.11' \
+  run_subject "$fixture" init >/dev/null
+assert_equals '198.51.100.11' "$(cat "$fixture/state/ddns/last-ip")" \
+  'WireGuard init chooses a deterministic address'
+assert_contains 'Endpoint = 198.51.100.11:51820' "$fixture/state/runtime/vpn.conf"
+pass 'WireGuard init renders DDNS state for Gluetun'
+
+fixture=$(new_wireguard_fixture wireguard_address_change)
+VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" init >/dev/null
+VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.20 \
+  run_subject "$fixture" watch-once >/dev/null
+assert_contains 'Endpoint = 198.51.100.20:51820' "$fixture/state/runtime/vpn.conf"
+assert_contains 'container restart --timeout 5 -- gluetun-test' "$fixture/docker.log"
+pass 'WireGuard DDNS address change renders and restarts Gluetun'
+
+fixture=$(new_wireguard_fixture wireguard_profile_change)
+VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" init >/dev/null
+sed -i 's/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=/DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=/' \
+  "$fixture/source/wg0.conf"
+VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" watch-once >/dev/null
+assert_contains 'container restart --timeout 5 -- gluetun-test' "$fixture/docker.log"
+pass 'WireGuard profile changes trigger a restart at the same IP'
+
+fixture=$(new_wireguard_fixture wireguard_multiple_peers)
+cat >> "$fixture/source/wg0.conf" <<'EOF'
+
+[Peer]
+PublicKey = DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=
+Endpoint = backup.example.test:51820
+EOF
+if VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" validate >/dev/null 2>&1; then
+  fail 'multiple WireGuard peers must be rejected'
+fi
+pass 'ambiguous WireGuard multi-peer profiles fail fast'
+
+fixture=$(new_wireguard_fixture wireguard_missing_key)
+sed -i '/^PrivateKey[[:space:]]*=/d' "$fixture/source/wg0.conf"
+if VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" validate >/dev/null 2>&1; then
+  fail 'WireGuard profile without PrivateKey must be rejected'
+fi
+pass 'WireGuard profiles missing required keys fail fast'
+
+fixture=$(new_wireguard_fixture wireguard_invalid_endpoint)
+sed -i 's/vpn.example.test:51820/vpn.example.test:70000/' "$fixture/source/wg0.conf"
+if VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" validate >/dev/null 2>&1; then
+  fail 'WireGuard endpoint with invalid port must be rejected'
+fi
+pass 'invalid WireGuard endpoint ports fail fast'
+
+fixture=$(new_wireguard_fixture wireguard_dns_failure)
+VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" init >/dev/null
+VPN_TYPE=wireguard DDNS_OVERRIDE_IPS='' \
+  run_subject "$fixture" watch-once >/dev/null
+assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" \
+  'WireGuard DNS failure preserves last IP'
+[ ! -e "$fixture/docker.log" ] || fail 'WireGuard DNS failure must not restart Gluetun'
+pass 'WireGuard transient DNS failure preserves the active tunnel'
+
+fixture=$(new_fixture unknown_vpn_type)
+if VPN_TYPE=ipsec DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" validate >/dev/null 2>&1; then
+  fail 'unknown VPN types must be rejected by the direct helper gate'
+fi
+pass 'direct helper gate rejects unknown VPN types'
 
 printf '1..%s\n' "$pass_count"

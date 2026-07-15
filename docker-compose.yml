@@ -19,13 +19,14 @@ x-ddns-common: &ddns-common
     - /tmp:size=8m,mode=1777
   logging: *default-logging
   volumes:
-    - ${OPENVPN_CONFIG_DIR:-./config/openvpn}:/source:ro
+    - ${VPN_CONFIG_DIR:-${OPENVPN_CONFIG_DIR:-./config/openvpn}}:/source:ro
     - vpn-state:/state
     - ./scripts/ddns-openvpn.sh:/opt/ddns/ddns-openvpn.sh:ro
   environment: &ddns-environment
     TZ: ${TZ:-UTC}
-    OPENVPN_SOURCE_CONFIG: /source/${OPENVPN_CONFIG_FILE:-client.ovpn}
-    OPENVPN_RENDERED_CONFIG: /state/openvpn/client.ovpn
+    VPN_TYPE: ${VPN_TYPE:-openvpn}
+    VPN_SOURCE_CONFIG: /source/${VPN_CONFIG_FILE:-${OPENVPN_CONFIG_FILE:-client.ovpn}}
+    VPN_RENDERED_CONFIG: /state/runtime/vpn.conf
     STATE_DIR: /state
     DDNS_HOSTNAME: ${DDNS_HOSTNAME:-}
     DDNS_RESOLVER: ${DDNS_RESOLVER:-}
@@ -73,16 +74,21 @@ services:
       - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${HTTP_PROXY_PORT:-8888}:8888/tcp"
       - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${SOCKS5_PROXY_PORT:-1080}:1080/tcp"
     volumes:
-      - ${OPENVPN_CONFIG_DIR:-./config/openvpn}:/source:ro
+      - ${VPN_CONFIG_DIR:-${OPENVPN_CONFIG_DIR:-./config/openvpn}}:/source:ro
       - vpn-state:/state:ro
     environment:
       TZ: ${TZ:-UTC}
       VPN_SERVICE_PROVIDER: custom
-      VPN_TYPE: openvpn
-      OPENVPN_CUSTOM_CONFIG: /state/openvpn/client.ovpn
+      VPN_TYPE: ${VPN_TYPE:-openvpn}
+      OPENVPN_CUSTOM_CONFIG: /state/runtime/vpn.conf
       OPENVPN_USER: ${OPENVPN_USER:-}
       OPENVPN_PASSWORD: ${OPENVPN_PASSWORD:-}
       OPENVPN_VERBOSITY: ${OPENVPN_VERBOSITY:-1}
+      WIREGUARD_CONF_SECRETFILE: /state/runtime/vpn.conf
+      WIREGUARD_ALLOWED_IPS: ${WIREGUARD_ALLOWED_IPS:-0.0.0.0/0}
+      WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL: ${WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL:-0}
+      WIREGUARD_MTU: ${WIREGUARD_MTU:-1320}
+      WIREGUARD_IMPLEMENTATION: ${WIREGUARD_IMPLEMENTATION:-auto}
       HEALTH_RESTART_VPN: "on"
       HTTPPROXY: ${HTTPPROXY:-on}
       HTTPPROXY_LISTENING_ADDRESS: :8888
@@ -141,6 +147,8 @@ services:
     read_only: true
     cap_drop:
       - ALL
+    cap_add:
+      - DAC_READ_SEARCH
     security_opt:
       - no-new-privileges:true
     tmpfs:

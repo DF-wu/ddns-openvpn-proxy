@@ -19,10 +19,21 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 cp "$repo_root/examples/openvpn/custom.ovpn" "$source_dir/custom.ovpn"
-chmod 600 "$source_dir/custom.ovpn"
+cat > "$source_dir/wg0.conf" <<'EOF'
+[Interface]
+PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+Address = 10.0.0.2/32
 
-export OPENVPN_CONFIG_DIR="$source_dir"
-export OPENVPN_CONFIG_FILE=custom.ovpn
+[Peer]
+PublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=
+Endpoint = vpn.example.test:51820
+AllowedIPs = 0.0.0.0/0
+EOF
+chmod 600 "$source_dir/custom.ovpn" "$source_dir/wg0.conf"
+
+export VPN_TYPE=openvpn
+export VPN_CONFIG_DIR="$source_dir"
+export VPN_CONFIG_FILE=custom.ovpn
 export DDNS_OVERRIDE_IPS=198.51.100.10
 export GLUETUN_CONTAINER_NAME="$target"
 
@@ -33,6 +44,16 @@ compose() {
 compose up -d --wait --wait-timeout 60 docker-socket-proxy >/dev/null
 compose run --rm --no-deps ddns-init validate >/dev/null
 compose run --rm --no-deps ddns-init init >/dev/null
+
+export VPN_TYPE=wireguard
+export VPN_CONFIG_FILE=wg0.conf
+export DDNS_OVERRIDE_IPS=198.51.100.20
+compose run --rm --no-deps ddns-init validate >/dev/null
+compose run --rm --no-deps ddns-init init >/dev/null
+# shellcheck disable=SC2016 # command substitution belongs to the container shell
+compose run --rm --no-deps --entrypoint /bin/sh ddns-init -ec \
+  'grep -Fq "Endpoint = 198.51.100.20:51820" /state/runtime/vpn.conf &&
+   test "$(stat -c %a /state/runtime/vpn.conf)" = 600' >/dev/null
 
 docker run -d --name "$target" alpine:3.22 sleep 300 >/dev/null
 docker run -d --name "$other_target" alpine:3.22 sleep 300 >/dev/null
@@ -79,4 +100,4 @@ while ! docker exec "$proxy_target" nc -z 127.0.0.1 1080; do
   sleep 1
 done
 
-printf 'Container contract test passed (stock helper, hardened vproxy, restart-only API).\n'
+printf 'Container contract test passed (OpenVPN/WireGuard helper, hardened vproxy, restart-only API).\n'

@@ -39,6 +39,7 @@ make validate-compose
 ### Lifecycle 與 network invariant
 
 - Gluetun 必須等待 init `service_completed_successfully`；
+- init、watcher 與 Gluetun 必須使用相同的 `VPN_TYPE` 與 runtime profile path；
 - vproxy 必須使用 `network_mode: service:gluetun`；
 - Gluetun firewall 必須允許 internal `1080/tcp`；
 - watcher 必須透過 `tcp://docker-socket-proxy:2375`；
@@ -50,6 +51,7 @@ make validate-compose
 - socket proxy 必須載入唯讀的精確 HAProxy policy，不得依賴上游 coarse-grained
   `CONTAINERS`／`ALLOW_RESTARTS` flags；
 - 所有非 Gluetun service 必須 `cap_drop: [ALL]`；
+- WireGuard PrivateKey／PresharedKey 不得出現在 Compose environment；
 - 所有 service 必須 `no-new-privileges:true`；
 - HTTP／SOCKS5 credentials 不可只設定一半；
 - 非 loopback bind 時，所有已啟用的 proxy 都必須有完整 authentication。
@@ -80,13 +82,19 @@ make test
 | Invalid override | 診斷用 IP 也必須是合法 IPv4 |
 | OpenVPN auth pair | `auth-user-pass` 必須有完整 Gluetun credentials |
 | Direct Compose proxy gate | helper 本身拒絕 partial／public unauthenticated proxy |
+| WireGuard validation | single interface／peer 與 required fields 才能通過 |
+| WireGuard renderer | 只替換 Endpoint hostname，保留 key 與 port |
+| WireGuard init/change | deterministic init、address change 與 profile change 都正確 restart |
+| WireGuard invalid profiles | multi-peer、missing key、invalid port 都 fail-fast |
+| WireGuard DNS failure | 保留現有 runtime profile，不 restart |
 
 測試用 fake `docker` 只記錄參數，因此可準確斷言 state commit ordering，而不會改動
 開發機上的 container。
 
 `tests/compose-validation.sh` 另外驗證安全設定的 negative cases：public bind 無
-credentials、三組 partial credential pair 與 moving image tag 都必須失敗；完整
-authenticated public bind 必須成功。
+credentials、三組 partial credential pair、moving image tag、未知 VPN type、錯誤
+WireGuard MTU／implementation 都必須失敗；完整 authenticated public bind 與
+WireGuard mode 必須成功。
 
 ## 真實 container contract
 
@@ -96,11 +104,11 @@ make test-container
 
 `tests/container-contract.sh` 會建立隔離的暫時 Compose project，完成下列驗證：
 
-1. `docker-socket-proxy:v0.4.2` 在 `read_only`、`cap_drop: ALL`、tmpfs 與自訂
-   restart-only HAProxy policy 下能 healthy；
-2. `docker:29.6.1-cli-alpine3.24` 在沒有額外 package 的情況下可讀取 `0755`
-   mounted POSIX script，以及 host UID 擁有的 `0600` source profile；
-3. stock helper 可 validate 與 init render；
+1. `docker-socket-proxy:v0.4.2` 在 `read_only`、`cap_drop: ALL`、最小
+   `DAC_READ_SEARCH`、tmpfs 與自訂 restart-only HAProxy policy 下能 healthy；
+2. `docker:29.6.1-cli-alpine3.24` 在沒有額外 package 的情況下可讀取 restrictive umask
+   checkout 的 `0700` mounted POSIX script，以及 host UID 擁有的 `0600` source profile；
+3. stock helper 可 validate／init render OpenVPN 與 WireGuard，runtime file 保持 `0600`；
 4. watcher 的 Docker client 可經 internal socket proxy restart 暫時 Alpine container；
 5. 同一路徑不得 restart 非目標 container，呼叫目標的 inspect、stop、kill、pause
    與 remove 也必須全部收到拒絕；
@@ -154,7 +162,8 @@ image。
 
 ## 真實 VPN 驗收
 
-自動測試不攜帶使用者的 provider credentials，也不能連到真實 OpenVPN server。
+自動測試不攜帶使用者的 provider credentials，也不能連到真實 OpenVPN／WireGuard
+server。
 production target 首次部署後必須完成以下驗收。
 
 ### 1. Service health
@@ -171,8 +180,8 @@ docker compose ps --all
 docker compose logs --tail=200 gluetun
 ```
 
-確認 OpenVPN 已建立 tunnel，沒有 certificate、authentication、cipher、route 或
-firewall error。
+確認所選 VPN 已建立 tunnel；OpenVPN 沒有 certificate／authentication／cipher error，
+WireGuard 沒有 key／address／route error，且兩者都沒有 firewall error。
 
 ### 3. HTTP 與 SOCKS5 data path
 
@@ -193,7 +202,7 @@ curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
 在可控制的 staging hostname 上：
 
 1. 記錄目前 `last-ip` 與 Gluetun container start time；
-2. 將 A record 更新到另一台可用 OpenVPN server；
+2. 將 A record 更新到另一台可用、提供相同協定與 credentials 的 VPN server；
 3. 等待 DNS TTL 與一個 poll interval；
 4. 確認 watcher 記錄 `reason=address-change`；
 5. 確認 `last-ip` 更新、Gluetun restart、兩個 proxy 恢復；
@@ -217,7 +226,7 @@ restart，既有 tunnel 仍傳輸。恢復 resolver 後應自行回到正常 pol
 
 ## 自動測試未涵蓋
 
-- 真實 provider certificate／username／password；
+- 真實 provider OpenVPN certificate／username／password 或 WireGuard key／address；
 - `/dev/net/tun` 與 target kernel 的相容性；
 - provider push routes、DNS 與 cipher negotiation；
 - host firewall 與 upstream network ACL；
