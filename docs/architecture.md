@@ -2,22 +2,23 @@
 
 ## 問題定義
 
-Gluetun 是本專案的 VPN runtime。它已經提供 OpenVPN、kill switch、DNS、連線健康
-檢查、自動修復與 HTTP proxy，不應重寫這些功能。
+Gluetun 是本專案的 VPN runtime。它已經提供 OpenVPN、WireGuard、kill switch、DNS、
+連線健康檢查、自動修復與 HTTP proxy，不應重寫這些功能。
 
-但 Gluetun 的 custom OpenVPN provider 有一項刻意的限制：啟動前的 firewall 不允許
-先做可能洩漏的 DNS 查詢，因此 custom profile 的 `remote` 必須是 IP。官方文件要求
-使用者先把 hostname 替換成 IP，v3.41.1 的 parser 也直接拒絕非 IP host：
+但 Gluetun 的 custom provider 有一項刻意的限制：啟動前的 firewall 不允許先做可能
+洩漏的 DNS 查詢，因此 OpenVPN `remote` 與 WireGuard `Endpoint` 都必須先是 IP。
+v3.41.1 的 parser／settings source 也直接以 IP connection 建模：
 
 - [Custom OpenVPN configuration file](https://github.com/qdm12/gluetun-wiki/blob/main/setup/openvpn-configuration-file.md)
-- [Gluetun v3.41.1 `extractRemote`](https://github.com/passteque/gluetun/blob/v3.41.1/internal/openvpn/extract/extract.go)
+- [Gluetun v3.41.1 `extractRemote`](https://github.com/qdm12/gluetun/blob/v3.41.1/internal/openvpn/extract/extract.go)
+- [Gluetun v3.41.1 WireGuard config source](https://github.com/qdm12/gluetun/blob/v3.41.1/internal/configuration/sources/files/wireguard.go)
 
 這和 DDNS server 的需求衝突：來源設定必須保留 hostname，且 IP 改變後必須讓
 Gluetun 重新讀取新的 resolved profile。本專案的責任只限於這個 adapter lifecycle。
 
 ## 系統全貌
 
-![DDNS OpenVPN Proxy architecture](assets/architecture.svg)
+![DDNS VPN Proxy architecture](assets/architecture.svg)
 
 ### 元件與邊界
 
@@ -31,7 +32,8 @@ Gluetun 重新讀取新的 resolved profile。本專案的責任只限於這個 
 
 沒有任何 service 使用 `build:`。`ddns-init` 與 `ddns-watcher` 掛載同一份
 `scripts/ddns-openvpn.sh`，用 `init`／`watch` subcommand 分離 lifecycle，因此不需要
-自有 watcher image。
+自有 watcher image。檔名為了既有部署相容性保留，但內容以 `VPN_TYPE` dispatch
+OpenVPN／WireGuard。
 
 ## 開機時序
 
@@ -41,14 +43,14 @@ docker compose up
        ▼
   ddns-init ── validate profile + referenced files
        │       resolve all IPv4 A records
-       │       render /state/openvpn/client.ovpn atomically
+       │       render /state/runtime/vpn.conf atomically
        │       write last-ip + fingerprint
        ▼
   exits 0
        │  depends_on: service_completed_successfully
        ▼
    Gluetun ─── read resolved runtime profile
-       │       build firewall + establish OpenVPN tunnel
+       │       build firewall + establish selected VPN tunnel
        │       expose HTTP proxy :8888
        ▼
     vproxy ─── share service:gluetun network namespace
@@ -79,12 +81,12 @@ ddns-watcher ─ poll indefinitely
 | 舊 IP 仍在 A record 集合 | 繼續使用舊 IP | 無，避免 round-robin flap |
 | IP 與 fingerprint 都相同 | 只更新 heartbeat | 無 |
 | 舊 IP 消失 | render 新 IP、restart、成功後 commit | 一次受控重連 |
-| `.ovpn` 或引用檔案變更 | render、restart、成功後 commit | 一次受控重連 |
+| `.ovpn`、引用檔案或 `wg0.conf` 變更 | render、restart、成功後 commit | 一次受控重連 |
 | Docker restart 失敗 | runtime profile 已安全寫入，但不 commit state | 現有 process 繼續；下輪重試 |
 
 ### 為何不在 DNS 暫時失敗時重啟
 
-現有 OpenVPN session 可能仍正常；即使 DNS resolver 短暫不可用，已建立的 tunnel
+現有 VPN session 可能仍正常；即使 DNS resolver 短暫不可用，已建立的 tunnel
 通常不需要 hostname。覆寫或重啟只會將控制面的短暫故障放大成資料面的中斷。因此
 watcher 採 stale-but-working 優先策略。
 
@@ -124,15 +126,15 @@ resolve → render temporary file → atomic rename → restart Gluetun
 │   ├── last-ip              # 最後成功提交的 endpoint
 │   ├── source.sha256        # profile + references fingerprint
 │   └── watcher-heartbeat    # watcher 最近一輪 epoch seconds
-└── openvpn/
-    └── client.ovpn          # Gluetun 實際讀取的 resolved profile
+└── runtime/
+    └── vpn.conf             # Gluetun 實際讀取的 resolved profile／secret file
 ```
 
 來源 profile、憑證與 credentials 只以 read-only bind mount 出現在 `/source`。runtime
 profile 權限為 `0600`；Gluetun 對 named volume 使用 read-only mount。
 
 `vpn-state` 可以刪除並重新產生，不需要備份。真正需要備份的是 host 上
-`OPENVPN_CONFIG_DIR` 指向的來源資料。
+`VPN_CONFIG_DIR` 指向的來源資料。
 
 ## OpenVPN render 契約
 
@@ -168,11 +170,34 @@ SOCKS5 credential pair，以及非 loopback bind 必須啟用 authentication。
 包含 whitespace 的 quoted file path 目前會 fail-fast，避免 shell／OpenVPN parser
 之間產生模糊解讀。需要時應先把檔名改成無空白形式。
 
+## WireGuard render 契約
+
+WireGuard source 必須剛好有一個 `[Interface]` 與一個 `[Peer]`，且包含 `PrivateKey`、
+`Address`、`PublicKey` 與 hostname-based `Endpoint`：
+
+```ini
+[Interface]
+PrivateKey = <client-private-key>
+Address = 10.0.0.2/32
+
+[Peer]
+PublicKey = <server-public-key>
+Endpoint = vpn.example.com:51820
+```
+
+Renderer 只將 endpoint 改為 `Endpoint = 203.0.113.10:51820`，其餘內容原樣保留，並以
+`0600` 原子寫入 `/state/runtime/vpn.conf`。PrivateKey／PresharedKey 不進 Compose
+environment；Gluetun 透過 `WIREGUARD_CONF_SECRETFILE` 讀取 named volume。
+
+Gluetun v3.41.1 從該檔匯入 PrivateKey、Address、PresharedKey、PublicKey 與 Endpoint；
+`AllowedIPs`、persistent keepalive、MTU 與 implementation 由 Compose environment 的
+`WIREGUARD_*` 設定提供。即使 source 保留這些常見 wg-quick 欄位，也以 `.env` 為準。
+
 ## Proxy 資料路徑
 
 ```text
 HTTP client  ── host:8888 ──► Gluetun HTTP proxy ──┐
-                                                    ├─► tun0 ─► OpenVPN server
+                                                    ├─► tun0/wg0 ─► VPN server
 SOCKS5 client ─ host:1080 ──► vproxy ───────────────┘
                                 │
                                 └─ network_mode: service:gluetun
@@ -207,9 +232,11 @@ container 名稱並在 tmpfs render 精確 policy，把 target 綁定
 與 kill，而 `CONTAINERS + POST` 會開放其他 containers POST endpoints。精確、anchored
 path allowlist 避免這兩種權限擴張。
 
-template 刻意保留 executable bit，確保在 restrictive umask checkout 後仍能被
-`cap_drop: ALL` 的 proxy 讀取；它只會作為 HAProxy config template 載入，不會被執行。
-socket proxy 仍屬敏感控制面，不應讓其他 container 加入該 network。
+policy template 只會作為 HAProxy config template 載入，不會被執行。因 restrictive
+umask 可能讓 Git checkout 的 bind-mounted 檔案成為 `0700`，socket proxy 與 helper
+一樣在 `cap_drop: ALL` 後只加回 `DAC_READ_SEARCH`；它看得到的 host path 仍僅有
+Docker socket 與 read-only policy file。socket proxy 仍屬敏感控制面，不應讓其他
+container 加入該 network。
 
 ## Container hardening
 
@@ -217,7 +244,7 @@ socket proxy 仍屬敏感控制面，不應讓其他 container 加入該 network
 | --- | --- |
 | `no-new-privileges:true` | 所有 service |
 | `cap_drop: [ALL]` | init、watcher、vproxy、socket proxy |
-| `DAC_READ_SEARCH` | 只有 init／watcher，用來讀取 read-only mount 的 `0600` source |
+| `DAC_READ_SEARCH` | init／watcher 讀 source；socket proxy 讀 policy bind mount |
 | `read_only: true` | init、watcher、vproxy、socket proxy |
 | 專用 tmpfs | 需要暫存空間的 hardened services |
 | `NET_ADMIN` | 只有 Gluetun |
@@ -226,10 +253,10 @@ socket proxy 仍屬敏感控制面，不應讓其他 container 加入該 network
 | image version pinning | 所有 service |
 | rotating `json-file` logs | 所有 service，預設 `10m × 3` |
 
-Gluetun 是唯一需要 `NET_ADMIN` 與 TUN device 的 service。Helper 額外保留最小的
-`DAC_READ_SEARCH`，原因是 container UID 0 在 drop `DAC_OVERRIDE` 後無法讀取 host
-UID 擁有的 `0600` profile/key；可見範圍仍只有 read-only source bind mount。helper
-script 使用 POSIX sh，完全依賴 stock Docker CLI image 已有的 `awk`、`getent`、
+Gluetun 是唯一需要 `NET_ADMIN` 與 TUN device 的 service。Bind-mount readers 額外保留
+最小的 `DAC_READ_SEARCH`，原因是 container UID 0 在 drop `DAC_OVERRIDE` 後無法讀取
+host UID 擁有的 `0600`／`0700` profile、key 或 policy；可見範圍仍受各自 mount 限制。
+helper script 使用 POSIX sh，完全依賴 stock Docker CLI image 已有的 `awk`、`getent`、
 `nslookup`、`sha256sum` 與 Docker client，不在啟動時 `apk add`。
 
 ## Health model
@@ -247,7 +274,8 @@ script 使用 POSIX sh，完全依賴 stock Docker CLI image 已有的 `awk`、`
 ### 只使用 Gluetun hostname
 
 OpenVPN 本身支援 hostname 與 `resolv-retry infinite`，但 Gluetun custom provider 在
-OpenVPN 啟動前就會拒絕非 IP `remote`，因此不可行。
+OpenVPN 啟動前就會拒絕非 IP `remote`；WireGuard settings 也要求 endpoint IP，因此
+兩種模式都不可行。
 
 ### 自建 watcher image
 
@@ -268,7 +296,7 @@ POSIX adapter 更符合純 Compose 目標。
 ## 明確限制
 
 - 只支援 IPv4 A record；不解析 AAAA。
-- 只支援一個 active `remote`。Gluetun custom parser 本身也只使用第一個 remote；本
+- OpenVPN 只支援一個 active `remote`；WireGuard 只支援一個 `[Peer]`／`Endpoint`。
   專案選擇 fail-fast，避免看似有 failover、實際被忽略。
 - hostname 解析與 profile 檢查週期最低 10 秒。
 - DDNS 改變會造成一次 container restart 與短暫 tunnel 中斷；不嘗試 hot reload。

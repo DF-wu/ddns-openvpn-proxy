@@ -30,15 +30,17 @@ ddns-openvpn-proxy/
 ├── scripts/
 │   └── ddns-openvpn.sh
 └── config/
-    └── openvpn/
-        ├── client.ovpn
-        ├── ca.crt
-        ├── client.crt
-        └── client.key
+    ├── openvpn/
+    │   ├── client.ovpn
+    │   ├── ca.crt
+    │   ├── client.crt
+    │   └── client.key
+    └── wireguard/
+        └── wg0.conf
 ```
 
-整個 `config/openvpn` 會 read-only mount 到 `/source`。`client.ovpn` 引用的相對路徑
-都以這個目錄為基準。
+只有 `VPN_CONFIG_DIR` 選定的目錄會 read-only mount 到 `/source`。OpenVPN
+`client.ovpn` 引用的相對路徑都以該目錄為基準。
 
 ## 準備 profile
 
@@ -88,6 +90,22 @@ Gluetun custom provider 會把 `auth-user-pass` 覆寫到 container 內部 auth 
 不要依賴 directive 的 `credentials.txt` path。只設定 user 或 password 其中一個會被
 Compose validator 拒絕。
 
+### WireGuard profile
+
+```bash
+mkdir -p config/wireguard
+install -m 600 /path/wg0.conf config/wireguard/wg0.conf
+```
+
+Profile 必須有且只有一個 `[Interface]` 與一個 `[Peer]`，並包含 PrivateKey、Address、
+PublicKey 與 hostname-based Endpoint。可從
+[`examples/wireguard/wg0.conf`](../examples/wireguard/wg0.conf) 複製結構，但務必替換所有
+key placeholder。
+
+Gluetun 只從 config secret file 匯入 key、address 與 endpoint。WireGuard routing、
+keepalive、MTU、implementation 請在 `.env` 設定，不要假設 wg-quick profile 中同名欄位
+會覆寫 Gluetun environment。
+
 不要把 `config/`、`.env` 或 credentials 加入 git。專案 `.gitignore` 已忽略常見路徑，
 但部署端仍應設定正確的檔案權限與備份政策。
 
@@ -100,21 +118,33 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-### 一般與 OpenVPN
+### 一般與 VPN
 
 | 變數 | 預設 | 說明 |
 | --- | --- | --- |
 | `TZ` | `Asia/Taipei` in example | log timezone；helper timestamp 固定 UTC |
 | `COMPOSE_PROJECT_NAME` | `ddns-openvpn-proxy` | Compose resource prefix |
-| `OPENVPN_CONFIG_DIR` | `./config/openvpn` | host 上的 source 目錄 |
-| `OPENVPN_CONFIG_FILE` | `client.ovpn` | source 目錄內的 profile 檔名 |
+| `VPN_TYPE` | `openvpn` | `openvpn` 或 `wireguard` |
+| `VPN_CONFIG_DIR` | `./config/openvpn` | host 上的 source 目錄 |
+| `VPN_CONFIG_FILE` | `client.ovpn` | source 目錄內的 profile 檔名 |
 | `OPENVPN_USER` | 空 | profile 有 `auth-user-pass` 時必填 |
 | `OPENVPN_PASSWORD` | 空 | 必須與 `OPENVPN_USER` 成對 |
-| `DDNS_HOSTNAME` | 空 | 空白時從唯一 `remote` 讀取 |
+| `DDNS_HOSTNAME` | 空 | 空白時從 OpenVPN `remote` 或 WireGuard `Endpoint` 讀取 |
 | `OPENVPN_VERBOSITY` | `1` | Gluetun OpenVPN verbosity，範圍依上游 |
 
-`DDNS_HOSTNAME` 適合 source profile 的 `remote` 暫時仍是舊值、但實際要監看的 hostname
-不同時使用。Renderer 不論 source 原值為何，都會改寫唯一 `remote` 的 host 欄位。
+舊版 `.env` 的 `OPENVPN_CONFIG_DIR`／`OPENVPN_CONFIG_FILE` 仍是 OpenVPN fallback alias；
+新部署應使用通用的 `VPN_CONFIG_*`。`DDNS_HOSTNAME` 適合 profile endpoint 暫時仍是舊
+值、但實際要監看的 hostname 不同時使用。Renderer 不論 source 原值為何，都會改寫
+唯一 endpoint host。
+
+### WireGuard runtime
+
+| 變數 | 預設 | 說明 |
+| --- | --- | --- |
+| `WIREGUARD_ALLOWED_IPS` | `0.0.0.0/0` | Gluetun tunnel routes；不從 wg0.conf 匯入 |
+| `WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL` | `0` | Go duration，例如 `25s` |
+| `WIREGUARD_MTU` | `1320` | validator 接受 `576..65535` |
+| `WIREGUARD_IMPLEMENTATION` | `auto` | `auto`、`userspace` 或 `kernelspace` |
 
 ### Polling 與 restart
 
@@ -238,9 +268,9 @@ docker compose logs -f --tail=100 \
 helper 使用可搜尋的 key-value 訊息：
 
 ```text
-2026-07-15T01:23:45Z level=INFO rendered profile hostname=vpn.example.com ip=203.0.113.10 output=/state/openvpn/client.ovpn
+2026-07-15T01:23:45Z level=INFO rendered profile vpn_type=wireguard hostname=vpn.example.com ip=203.0.113.10 output=/state/runtime/vpn.conf
 2026-07-15T02:34:56Z level=WARN DNS lookup failed hostname=vpn.example.com; keeping current tunnel
-2026-07-15T03:45:12Z level=INFO restarted Gluetun reason=address-change hostname=vpn.example.com old_ip=203.0.113.10 new_ip=203.0.113.20
+2026-07-15T03:45:12Z level=INFO restarted Gluetun vpn_type=wireguard reason=address-change hostname=vpn.example.com old_ip=203.0.113.10 new_ip=203.0.113.20
 ```
 
 IP 與 profile 都不變時不寫 INFO，避免每分鐘製造無價值 log；heartbeat 仍會更新。
@@ -252,11 +282,12 @@ docker compose run --rm --no-deps --entrypoint sh ddns-init -c '
   printf "last-ip: "; cat /state/ddns/last-ip
   printf "fingerprint: "; cat /state/ddns/source.sha256
   printf "heartbeat: "; cat /state/ddns/watcher-heartbeat
-  sed -n "1,40p" /state/openvpn/client.ovpn
+  sed -n "1,40p" /state/runtime/vpn.conf
 '
 ```
 
-runtime profile 含敏感路徑與可能的 inline certificate/key，不要貼到公開 issue。
+runtime profile 可能含 inline OpenVPN certificate/key 或 WireGuard PrivateKey，不要貼到
+公開 issue。
 
 ## Proxy 驗證
 
@@ -306,9 +337,10 @@ tunnel 或其他加密 transport。
 
 ## 設定與憑證輪替
 
-source 目錄是 bind mount。替換 `.ovpn`、certificate、key 或 credentials 後，不必
-手動 restart；watcher 最晚在一個 polling interval 內偵測 fingerprint 改變並重啟
-Gluetun。
+source 目錄是 bind mount。替換 `.ovpn`、WireGuard `.conf`、certificate 或 key 後，
+不必手動 restart；watcher 最晚在一個 polling interval 內偵測 fingerprint 改變並
+重啟 Gluetun。環境變數 credentials／WireGuard runtime settings 改變則需 recreate，
+因為 container environment 不會熱更新。
 
 建議使用同 filesystem 的 atomic replace：
 
@@ -380,7 +412,7 @@ make down
 make clean
 ```
 
-source `config/openvpn` 不會被刪除。
+source `config/openvpn`／`config/wireguard` 不會被刪除。
 
 ## 故障排除
 
@@ -399,14 +431,18 @@ docker compose logs ddns-init
 
 ```text
 level=ERROR OpenVPN profile not found: /source/client.ovpn
+# 或
+level=ERROR WireGuard profile not found: /source/wg0.conf
 ```
 
 確認 `.env` 的 host directory 與 filename：
 
 ```bash
-ls -la config/openvpn
+ls -la "$(awk -F= '$1 == "VPN_CONFIG_DIR" { print $2 }' .env)"
 docker compose config | grep -A5 '/source'
 ```
+
+也確認 `VPN_TYPE`、`VPN_CONFIG_DIR`、`VPN_CONFIG_FILE` 三者屬於同一協定。
 
 ### 多個 remote 被拒絕
 
@@ -423,8 +459,20 @@ failover。建立一份只保留目標 DDNS hostname 的 deployment profile。
 ca references an unreadable file: /source/ca.crt
 ```
 
-將檔案放進 `OPENVPN_CONFIG_DIR`，修正 profile 路徑與大小寫。container 不會看到該
+將檔案放進 `VPN_CONFIG_DIR`，修正 profile 路徑與大小寫。container 不會看到該
 目錄以外的 host file。
+
+### WireGuard profile 被拒絕
+
+常見原因是多個 `[Peer]`、缺少 PrivateKey／Address／PublicKey／Endpoint，或 Endpoint
+不是 `hostname:1..65535`。先執行：
+
+```bash
+docker compose run --rm --no-deps ddns-init validate
+```
+
+若 Gluetun 回報 key、address 或 route 無效，再確認 provider key 是合法 WireGuard
+base64 key，並檢查 `.env` 的 `WIREGUARD_ALLOWED_IPS` 與 MTU。
 
 ### Init 一直重試 DNS
 
@@ -463,8 +511,8 @@ docker compose logs --tail=200 gluetun
 docker inspect --format '{{json .State.Health}}' ddns-openvpn-proxy | jq
 ```
 
-常見原因：錯誤憑證、provider server 不可達、cipher 不相容、host firewall、TUN
-device、或 DDNS 新 IP 尚未提供 OpenVPN service。
+常見原因：錯誤 OpenVPN 憑證／WireGuard key、provider server 不可達、cipher／route
+不相容、host firewall、TUN device，或 DDNS 新 IP 尚未提供所選 VPN service。
 
 ### Watcher 無法 restart
 

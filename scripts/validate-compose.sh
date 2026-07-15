@@ -38,6 +38,23 @@ assert_jq '[.services | keys[]] == ["ddns-init","ddns-watcher","docker-socket-pr
   'the five-service production topology must be present'
 assert_jq '.services."ddns-init".image == .services."ddns-watcher".image' \
   'init and watcher must use the same stock helper image'
+assert_jq '.services."ddns-init".environment.VPN_TYPE == .services.gluetun.environment.VPN_TYPE and
+           .services."ddns-watcher".environment.VPN_TYPE == .services.gluetun.environment.VPN_TYPE' \
+  'init, watcher, and Gluetun must use the same VPN type'
+assert_jq '.services."ddns-init".environment.VPN_RENDERED_CONFIG == "/state/runtime/vpn.conf" and
+           .services."ddns-watcher".environment.VPN_RENDERED_CONFIG == "/state/runtime/vpn.conf" and
+           .services.gluetun.environment.OPENVPN_CUSTOM_CONFIG == "/state/runtime/vpn.conf" and
+           .services.gluetun.environment.WIREGUARD_CONF_SECRETFILE == "/state/runtime/vpn.conf"' \
+  'both VPN protocols must consume the atomically rendered runtime profile'
+assert_jq 'all([.services."ddns-init", .services."ddns-watcher", .services.gluetun][];
+           any(.volumes[]; .target == "/source" and .read_only == true)) and
+           ([.services."ddns-init", .services."ddns-watcher", .services.gluetun]
+             | map(.volumes[] | select(.target == "/source") | .source)
+             | unique | length == 1) and
+           .services."ddns-init".environment.VPN_SOURCE_CONFIG ==
+             .services."ddns-watcher".environment.VPN_SOURCE_CONFIG and
+           (.services."ddns-init".environment.VPN_SOURCE_CONFIG | startswith("/source/"))' \
+  'init, watcher, and Gluetun must share the read-only source profile mount'
 assert_jq '.services.gluetun.depends_on."ddns-init".condition == "service_completed_successfully"' \
   'Gluetun must wait for successful initial rendering'
 assert_jq '.services.vproxy.network_mode == "service:gluetun"' \
@@ -55,8 +72,13 @@ assert_jq 'all([.services."ddns-init", .services."ddns-watcher"][];
            (.environment | has("HTTPPROXY_USER") | not) and
            (.environment | has("HTTPPROXY_PASSWORD") | not) and
            (.environment | has("SOCKS5_USER") | not) and
-           (.environment | has("SOCKS5_PASSWORD") | not))' \
+           (.environment | has("SOCKS5_PASSWORD") | not) and
+           (.environment | has("WIREGUARD_PRIVATE_KEY") | not) and
+           (.environment | has("WIREGUARD_PRESHARED_KEY") | not))' \
   'helper services must receive only credential-presence flags, never secrets'
+assert_jq '(.services.gluetun.environment | has("WIREGUARD_PRIVATE_KEY") | not) and
+           (.services.gluetun.environment | has("WIREGUARD_PRESHARED_KEY") | not)' \
+  'WireGuard keys must come from the runtime secret file, not environment variables'
 assert_jq '.networks."docker-api".internal == true' \
   'Docker API network must be internal'
 assert_jq '[.services | to_entries[] | select(any(.value.volumes[]?; .source == "/var/run/docker.sock")) | .key] == ["docker-socket-proxy"]' \
@@ -76,8 +98,8 @@ assert_jq 'all(.services | to_entries[] | select(.key != "gluetun"); .value.cap_
 assert_jq '.services."ddns-init".cap_add == ["DAC_READ_SEARCH"] and
            .services."ddns-watcher".cap_add == ["DAC_READ_SEARCH"] and
            (.services.vproxy | has("cap_add") | not) and
-           (.services."docker-socket-proxy" | has("cap_add") | not)' \
-  'only helper services may add DAC_READ_SEARCH for read-only 0600 source files'
+           .services."docker-socket-proxy".cap_add == ["DAC_READ_SEARCH"]' \
+  'bind-mount readers may only add DAC_READ_SEARCH for restrictive host file modes'
 assert_jq 'all(.services[]; .security_opt == ["no-new-privileges:true"])' \
   'all services must set no-new-privileges'
 assert_jq 'all(.services[];
@@ -104,6 +126,42 @@ socks_user=$(jq -r '.services.vproxy.environment.SOCKS5_USER // ""' "$rendered")
 socks_password=$(jq -r '.services.vproxy.environment.SOCKS5_PASSWORD // ""' "$rendered")
 openvpn_user=$(jq -r '.services.gluetun.environment.OPENVPN_USER // ""' "$rendered")
 openvpn_password=$(jq -r '.services.gluetun.environment.OPENVPN_PASSWORD // ""' "$rendered")
+vpn_type=$(jq -r '.services.gluetun.environment.VPN_TYPE // ""' "$rendered")
+wireguard_allowed_ips=$(jq -r '.services.gluetun.environment.WIREGUARD_ALLOWED_IPS // ""' "$rendered")
+wireguard_mtu=$(jq -r '.services.gluetun.environment.WIREGUARD_MTU // ""' "$rendered")
+wireguard_implementation=$(jq -r '.services.gluetun.environment.WIREGUARD_IMPLEMENTATION // ""' "$rendered")
+
+case $vpn_type in
+  openvpn|wireguard) ;;
+  *)
+    printf 'ERROR: VPN_TYPE must be openvpn or wireguard, got: %s\n' "$vpn_type" >&2
+    exit 1
+    ;;
+esac
+
+[ -n "$wireguard_allowed_ips" ] || {
+  printf 'ERROR: WIREGUARD_ALLOWED_IPS must not be empty.\n' >&2
+  exit 1
+}
+
+case $wireguard_mtu in
+  ''|*[!0-9]*)
+    printf 'ERROR: WIREGUARD_MTU must be an integer.\n' >&2
+    exit 1
+    ;;
+esac
+if ! awk -v mtu="$wireguard_mtu" 'BEGIN { exit !(mtu >= 576 && mtu <= 65535) }'; then
+  printf 'ERROR: WIREGUARD_MTU must be between 576 and 65535.\n' >&2
+  exit 1
+fi
+
+case $wireguard_implementation in
+  auto|userspace|kernelspace) ;;
+  *)
+    printf 'ERROR: WIREGUARD_IMPLEMENTATION must be auto, userspace, or kernelspace.\n' >&2
+    exit 1
+    ;;
+esac
 
 if { [ -n "$openvpn_user" ] && [ -z "$openvpn_password" ]; } ||
    { [ -z "$openvpn_user" ] && [ -n "$openvpn_password" ]; }; then
