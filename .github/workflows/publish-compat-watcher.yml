@@ -42,7 +42,7 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/ddns-openvpn-proxy-watcher:latest
-            ghcr.io/${{ github.repository_owner }}/ddns-openvpn-proxy-watcher:compat-${{ github.sha }}
+            ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest
+            ghcr.io/df-wu/ddns-openvpn-proxy-watcher:compat-${{ github.sha }}
           provenance: false
           sbom: false
