@@ -131,8 +131,9 @@ validate_config() {
       exit
     }
   ' "$source_config")
-  [ "$remote_fields" -ge 2 ] && [ "$remote_fields" -le 4 ] ||
+  if ! { [ "$remote_fields" -ge 2 ] && [ "$remote_fields" -le 4 ]; }; then
     die "remote must be: remote HOST [PORT] [PROTO]"
+  fi
 
   remote_port=$(awk '
     /^[[:space:]]*[#;]/ { next }
@@ -140,8 +141,9 @@ validate_config() {
   ' "$source_config")
   if [ -n "$remote_port" ]; then
     is_uint "$remote_port" || die "remote port is not numeric: $remote_port"
-    [ "$remote_port" -ge 1 ] && [ "$remote_port" -le 65535 ] ||
+    if ! { [ "$remote_port" -ge 1 ] && [ "$remote_port" -le 65535 ]; }; then
       die "remote port must be between 1 and 65535: $remote_port"
+    fi
   fi
 
   remote_protocol=$(awk '
@@ -159,9 +161,10 @@ validate_config() {
     END { print count + 0 }
   ' "$source_config")
   if [ "$auth_user_pass_count" -gt 0 ]; then
-    [ "${OPENVPN_USER_CONFIGURED:-0}" = 1 ] &&
-      [ "${OPENVPN_PASSWORD_CONFIGURED:-0}" = 1 ] ||
+    if ! { [ "${OPENVPN_USER_CONFIGURED:-0}" = 1 ] &&
+      [ "${OPENVPN_PASSWORD_CONFIGURED:-0}" = 1 ]; }; then
       die "profile uses auth-user-pass; set both OPENVPN_USER and OPENVPN_PASSWORD"
+    fi
   fi
 
   validate_configured_pair OPENVPN \
@@ -204,12 +207,15 @@ validate_config() {
       die "DDNS_OVERRIDE_IPS contains an invalid IPv4 address"
   fi
 
-  is_uint "$poll_seconds" && [ "$poll_seconds" -ge 10 ] ||
+  if ! { is_uint "$poll_seconds" && [ "$poll_seconds" -ge 10 ]; }; then
     die "DDNS_POLL_SECONDS must be an integer of at least 10"
-  is_uint "$retry_seconds" && [ "$retry_seconds" -ge 1 ] ||
+  fi
+  if ! { is_uint "$retry_seconds" && [ "$retry_seconds" -ge 1 ]; }; then
     die "DDNS_INIT_RETRY_SECONDS must be a positive integer"
-  is_uint "$restart_timeout" && [ "$restart_timeout" -ge 1 ] ||
+  fi
+  if ! { is_uint "$restart_timeout" && [ "$restart_timeout" -ge 1 ]; }; then
     die "GLUETUN_RESTART_TIMEOUT_SECONDS must be a positive integer"
+  fi
   case $gluetun_container in
     ''|-*|*[!A-Za-z0-9_.-]*) die "invalid GLUETUN_CONTAINER_NAME: $gluetun_container" ;;
   esac
