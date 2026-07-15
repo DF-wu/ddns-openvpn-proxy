@@ -52,6 +52,7 @@ jobs:
       - name: Check shell scripts
         run: |
           shellcheck -s sh scripts/*.sh tests/*.sh
+          shellcheck -s bash compat/watcher/*.sh
 
       - name: Validate and test repository
         run: make check

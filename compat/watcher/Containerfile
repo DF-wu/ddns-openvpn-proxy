@@ -1,0 +1,6 @@
+FROM ghcr.io/df-wu/ddns-openvpn-proxy-watcher@sha256:1016779bebe1759c6c1da3564e76264ee055929b284d80b3321765379a8638ec
+
+COPY compat/watcher/vpn-ddns-lib.sh /app/scripts/vpn-ddns-lib.sh
+COPY compat/watcher/watch-ddns-and-restart.sh /app/scripts/watch-ddns-and-restart.sh
+
+RUN chmod 0755 /app/scripts/vpn-ddns-lib.sh /app/scripts/watch-ddns-and-restart.sh

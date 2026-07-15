@@ -28,6 +28,7 @@ validate-compose:
 test:
 	@tests/run.sh
 	@tests/compose-validation.sh
+	@tests/compat-watcher.sh
 
 test-container:
 	@tests/container-contract.sh
