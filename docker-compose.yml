@@ -1,33 +1,64 @@
+name: ${COMPOSE_PROJECT_NAME:-ddns-openvpn-proxy}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILE:-3}
+
+x-ddns-common: &ddns-common
+  image: ${DDNS_HELPER_IMAGE:-docker:29.6.1-cli-alpine3.24}
+  read_only: true
+  cap_drop:
+    - ALL
+  cap_add:
+    - DAC_READ_SEARCH
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:size=8m,mode=1777
+  logging: *default-logging
+  volumes:
+    - ${OPENVPN_CONFIG_DIR:-./config/openvpn}:/source:ro
+    - vpn-state:/state
+    - ./scripts/ddns-openvpn.sh:/opt/ddns/ddns-openvpn.sh:ro
+  environment: &ddns-environment
+    TZ: ${TZ:-UTC}
+    OPENVPN_SOURCE_CONFIG: /source/${OPENVPN_CONFIG_FILE:-client.ovpn}
+    OPENVPN_RENDERED_CONFIG: /state/openvpn/client.ovpn
+    STATE_DIR: /state
+    DDNS_HOSTNAME: ${DDNS_HOSTNAME:-}
+    DDNS_RESOLVER: ${DDNS_RESOLVER:-}
+    DDNS_POLL_SECONDS: ${DDNS_POLL_SECONDS:-60}
+    DDNS_INIT_RETRY_SECONDS: ${DDNS_INIT_RETRY_SECONDS:-5}
+    DDNS_OVERRIDE_IPS: ${DDNS_OVERRIDE_IPS:-}
+    OPENVPN_USER_CONFIGURED: ${OPENVPN_USER:+1}
+    OPENVPN_PASSWORD_CONFIGURED: ${OPENVPN_PASSWORD:+1}
+    HTTPPROXY_ENABLED: ${HTTPPROXY:-on}
+    HTTPPROXY_USER_CONFIGURED: ${HTTPPROXY_USER:+1}
+    HTTPPROXY_PASSWORD_CONFIGURED: ${HTTPPROXY_PASSWORD:+1}
+    SOCKS5_USER_CONFIGURED: ${SOCKS5_USER:+1}
+    SOCKS5_PASSWORD_CONFIGURED: ${SOCKS5_PASSWORD:+1}
+    PROXY_BIND_ADDRESS: ${PROXY_BIND_ADDRESS:-127.0.0.1}
+    GLUETUN_CONTAINER_NAME: ${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}
+    GLUETUN_RESTART_TIMEOUT_SECONDS: ${GLUETUN_RESTART_TIMEOUT_SECONDS:-20}
+  entrypoint:
+    - /bin/sh
+    - /opt/ddns/ddns-openvpn.sh
+
 services:
+  # One-shot gate: Gluetun never starts with a stale or hostname-based profile.
   ddns-init:
-    image: ${WATCHER_IMAGE:-ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest}
+    <<: *ddns-common
+    command:
+      - init
     restart: "no"
-    volumes:
-      - ${OPENVPN_CONFIG_DIR:-./config}:/gluetun/source:ro
-      - ${STATE_DIR:-./state}:/gluetun/state
-    environment:
-      TZ: ${TZ:-UTC}
-      VPN_TYPE: ${VPN_TYPE:-openvpn}
-      OPENVPN_SOURCE_CONFIG: ${OPENVPN_SOURCE_CONFIG:-}
-      OPENVPN_SOURCE_DIR: /gluetun/source/openvpn
-      OPENVPN_RENDERED_CONFIG: /gluetun/state/openvpn/current.ovpn
-      WIREGUARD_SOURCE_CONFIG: ${WIREGUARD_SOURCE_CONFIG:-}
-      WIREGUARD_SOURCE_DIR: /gluetun/source/wireguard
-      WIREGUARD_RENDERED_CONFIG: /gluetun/state/wireguard/wg0.conf
-      DDNS_HOSTNAME: ${DDNS_HOSTNAME:-}
-      DDNS_POLL_SECONDS: ${DDNS_POLL_SECONDS:-60}
-      DDNS_COOLDOWN_SECONDS: ${DDNS_COOLDOWN_SECONDS:-15}
-      DDNS_INIT_RETRY_SECONDS: ${DDNS_INIT_RETRY_SECONDS:-5}
-      DDNS_INIT_MAX_ATTEMPTS: ${DDNS_INIT_MAX_ATTEMPTS:-0}
-      DDNS_RESOLVER: ${DDNS_RESOLVER:-}
-      DDNS_OVERRIDE_IP: ${DDNS_OVERRIDE_IP:-}
-      STATE_DIR: /gluetun/state
-    entrypoint: ["/app/scripts/ddns-init.sh"]
 
   gluetun:
-    image: ${GLUETUN_IMAGE:-qmcgaw/gluetun:latest}
+    image: ${GLUETUN_IMAGE:-qmcgaw/gluetun:v3.41.1}
     container_name: ${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}
     restart: unless-stopped
+    stop_grace_period: 30s
     depends_on:
       ddns-init:
         condition: service_completed_successfully
@@ -37,74 +68,138 @@ services:
       - /dev/net/tun:/dev/net/tun
     security_opt:
       - no-new-privileges:true
+    logging: *default-logging
     ports:
-      - "${HTTP_PROXY_PORT:-8888}:8888/tcp"
-      - "${SOCKS5_PROXY_PORT:-1080}:1080/tcp"
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${HTTP_PROXY_PORT:-8888}:8888/tcp"
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${SOCKS5_PROXY_PORT:-1080}:1080/tcp"
     volumes:
-      - ${OPENVPN_CONFIG_DIR:-./config}:/gluetun/source:ro
-      - ${STATE_DIR:-./state}:/gluetun/state
+      - ${OPENVPN_CONFIG_DIR:-./config/openvpn}:/source:ro
+      - vpn-state:/state:ro
     environment:
       TZ: ${TZ:-UTC}
       VPN_SERVICE_PROVIDER: custom
-      VPN_TYPE: ${VPN_TYPE:-openvpn}
-      OPENVPN_CUSTOM_CONFIG: /gluetun/state/openvpn/current.ovpn
-      WIREGUARD_CUSTOM_CONFIG: /gluetun/state/wireguard/wg0.conf
-      HTTPPROXY: on
+      VPN_TYPE: openvpn
+      OPENVPN_CUSTOM_CONFIG: /state/openvpn/client.ovpn
+      OPENVPN_USER: ${OPENVPN_USER:-}
+      OPENVPN_PASSWORD: ${OPENVPN_PASSWORD:-}
+      OPENVPN_VERBOSITY: ${OPENVPN_VERBOSITY:-1}
+      HEALTH_RESTART_VPN: "on"
+      HTTPPROXY: ${HTTPPROXY:-on}
       HTTPPROXY_LISTENING_ADDRESS: :8888
       HTTPPROXY_USER: ${HTTPPROXY_USER:-}
       HTTPPROXY_PASSWORD: ${HTTPPROXY_PASSWORD:-}
       HTTPPROXY_STEALTH: ${HTTPPROXY_STEALTH:-off}
-      # vproxy shares this network namespace, so Gluetun must explicitly allow
-      # the sidecar's listener through its firewall on the default interface.
+      # vproxy shares this namespace; Gluetun must admit its listener.
       FIREWALL_INPUT_PORTS: "1080"
 
   vproxy:
-    image: ${VPROXY_IMAGE:-ghcr.io/0x676e67/vproxy:latest}
-    network_mode: "service:gluetun"
+    image: ${VPROXY_IMAGE:-ghcr.io/0x676e67/vproxy:v2.5.5}
+    network_mode: service:gluetun
+    restart: unless-stopped
     depends_on:
       gluetun:
-        condition: service_started
-    restart: unless-stopped
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    logging: *default-logging
     environment:
       SOCKS5_USER: ${SOCKS5_USER:-}
       SOCKS5_PASSWORD: ${SOCKS5_PASSWORD:-}
-    entrypoint: ["/bin/sh", "-c"]
-    # Keep the script as one argv item for `sh -c`. A scalar command is split
-    # by Compose at shell operators such as &&, truncating this script.
+      VPROXY_LOG: ${VPROXY_LOG:-info}
+    entrypoint:
+      - /bin/sh
+      - -ec
     command:
       - |
         if [ -n "$${SOCKS5_USER}" ] && [ -n "$${SOCKS5_PASSWORD}" ]; then
-          exec vproxy run --bind 0.0.0.0:1080 socks5 -u "$${SOCKS5_USER}" -p "$${SOCKS5_PASSWORD}"
+          exec /bin/vproxy run --bind 0.0.0.0:1080 socks5 -u "$${SOCKS5_USER}" -p "$${SOCKS5_PASSWORD}"
         elif [ -z "$${SOCKS5_USER}" ] && [ -z "$${SOCKS5_PASSWORD}" ]; then
-          exec vproxy run --bind 0.0.0.0:1080 socks5
+          exec /bin/vproxy run --bind 0.0.0.0:1080 socks5
         else
           echo "ERROR: SOCKS5_USER and SOCKS5_PASSWORD must both be set or both be empty" >&2
           exit 64
         fi
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - nc -z 127.0.0.1 1080
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Restrict the helper to Docker's restart endpoint instead of mounting the
+  # host socket directly into the DDNS watcher.
+  docker-socket-proxy:
+    image: ${SOCKET_PROXY_IMAGE:-ghcr.io/tecnativa/docker-socket-proxy:v0.4.2}
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run:size=8m,mode=0755
+      - /tmp:size=8m,mode=1777
+    logging: *default-logging
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: "1"
+      POST: "1"
+      ALLOW_RESTARTS: "1"
+      ALLOW_START: "0"
+      ALLOW_STOP: "0"
+      LOG_LEVEL: warning
+    networks:
+      - docker-api
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - --spider
+        - http://127.0.0.1:2375/_ping
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
   ddns-watcher:
-    image: ${WATCHER_IMAGE:-ghcr.io/df-wu/ddns-openvpn-proxy-watcher:latest}
+    <<: *ddns-common
+    command:
+      - watch
     restart: unless-stopped
     depends_on:
       gluetun:
         condition: service_started
-    volumes:
-      - ${OPENVPN_CONFIG_DIR:-./config}:/gluetun/source:ro
-      - ${STATE_DIR:-./state}:/gluetun/state
-      - /var/run/docker.sock:/var/run/docker.sock
+      docker-socket-proxy:
+        condition: service_healthy
     environment:
-      TZ: ${TZ:-UTC}
-      VPN_TYPE: ${VPN_TYPE:-openvpn}
-      OPENVPN_SOURCE_CONFIG: ${OPENVPN_SOURCE_CONFIG:-}
-      OPENVPN_SOURCE_DIR: /gluetun/source/openvpn
-      OPENVPN_RENDERED_CONFIG: /gluetun/state/openvpn/current.ovpn
-      WIREGUARD_SOURCE_CONFIG: ${WIREGUARD_SOURCE_CONFIG:-}
-      WIREGUARD_SOURCE_DIR: /gluetun/source/wireguard
-      WIREGUARD_RENDERED_CONFIG: /gluetun/state/wireguard/wg0.conf
-      DDNS_HOSTNAME: ${DDNS_HOSTNAME:-}
-      DDNS_POLL_SECONDS: ${DDNS_POLL_SECONDS:-60}
-      DDNS_COOLDOWN_SECONDS: ${DDNS_COOLDOWN_SECONDS:-15}
-      DDNS_RESOLVER: ${DDNS_RESOLVER:-}
-      DDNS_OVERRIDE_IP: ${DDNS_OVERRIDE_IP:-}
-      GLUETUN_CONTAINER_NAME: ${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}
-      STATE_DIR: /gluetun/state
+      <<: *ddns-environment
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    networks:
+      - default
+      - docker-api
+    healthcheck:
+      test:
+        - CMD
+        - /bin/sh
+        - /opt/ddns/ddns-openvpn.sh
+        - healthcheck
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+networks:
+  docker-api:
+    internal: true
+
+volumes:
+  vpn-state:

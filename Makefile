@@ -1,54 +1,59 @@
-SHELL := /usr/bin/env bash
+SHELL := /bin/sh
 
-.PHONY: help validate validate-config validate-openvpn-config validate-wireguard-config validate-compose validate-repo up down logs smoke smoke-openvpn smoke-wireguard
+.PHONY: help check lint-docs validate validate-compose test test-container up pull down restart status logs config clean
 
 help:
 	@printf '%s\n' \
-	  'make validate                Validate the compose stack and VPN config contract' \
-	  'make validate-config         Validate VPN config (default: OpenVPN, set VPN_TYPE=wireguard)' \
-	  'make validate-openvpn-config Validate ./config/openvpn/ (or pass CONFIG=...)' \
-	  'make validate-wireguard-config Validate ./config/wireguard/ (or pass CONFIG=...)' \
-	  'make validate-compose        Validate docker-compose.yml with example inputs' \
-	  'make validate-repo           Validate example configs and Compose contract' \
-	  'make up                      Start the DDNS-aware Gluetun stack' \
-	  'make down                    Stop the stack' \
-	  'make logs                    Tail the Gluetun and DDNS watcher logs' \
-	  'make smoke                   Run all DDNS render/restart smoke tests' \
-	  'make smoke-openvpn           Run OpenVPN smoke test' \
-	  'make smoke-wireguard         Run WireGuard smoke test'
+	  'make check      Run every repository validation and test' \
+	  'make validate   Validate Compose plus your mounted OpenVPN profile' \
+	  'make up         Validate, pull, and start the production stack' \
+	  'make status     Show service and DDNS runtime status' \
+	  'make logs       Follow VPN, proxy, and DDNS logs' \
+	  'make restart    Recreate services after configuration changes' \
+	  'make down       Stop services; keep the runtime state volume' \
+	  'make clean      Stop services and delete the runtime state volume'
 
-validate: validate-config validate-compose
+check: lint-docs validate-compose test test-container
 
-validate-repo:
-	@$(MAKE) validate-openvpn-config CONFIG=./examples/openvpn/custom.ovpn
-	@$(MAKE) validate-wireguard-config CONFIG=./examples/wireguard/wg0.conf
-	@$(MAKE) validate-compose
+lint-docs:
+	docker run --rm -v "$(CURDIR):/workdir:ro" -w /workdir \
+	  davidanson/markdownlint-cli2:v0.18.1 README.md 'docs/**/*.md'
 
-validate-config:
-	@scripts/validate-vpn-config.sh "$(CONFIG)"
-
-validate-openvpn-config:
-	@VPN_TYPE=openvpn scripts/validate-vpn-config.sh "$(CONFIG)"
-
-validate-wireguard-config:
-	@VPN_TYPE=wireguard scripts/validate-vpn-config.sh "$(CONFIG)"
+validate: validate-compose
+	docker compose run --rm --no-deps ddns-init validate
 
 validate-compose:
 	@scripts/validate-compose.sh
 
-up:
-	docker compose up -d
+test:
+	@tests/run.sh
+	@tests/compose-validation.sh
+
+test-container:
+	@tests/container-contract.sh
+
+pull:
+	docker compose pull
+
+up: validate pull
+	docker compose up -d --wait --wait-timeout 180
 
 down:
 	docker compose down --remove-orphans
 
+clean:
+	docker compose down --remove-orphans --volumes
+
+restart: validate
+	docker compose up -d --force-recreate --wait --wait-timeout 180
+
+status:
+	@docker compose ps
+	@printf '\nDDNS watcher:\n'
+	@docker compose logs --tail=10 ddns-watcher
+
 logs:
-	docker compose logs -f gluetun vproxy ddns-watcher
+	docker compose logs -f --tail=100 gluetun vproxy ddns-watcher docker-socket-proxy
 
-smoke: smoke-openvpn smoke-wireguard
-
-smoke-openvpn:
-	@VPN_TYPE=openvpn tests/e2e/smoke.sh
-
-smoke-wireguard:
-	@VPN_TYPE=wireguard tests/e2e/smoke.sh
+config:
+	docker compose config

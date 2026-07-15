@@ -1,0 +1,215 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
+subject=$repo_root/scripts/ddns-openvpn.sh
+workdir=$(mktemp -d)
+trap 'rm -rf "$workdir"' EXIT HUP INT TERM
+
+pass_count=0
+
+pass() {
+  pass_count=$((pass_count + 1))
+  printf 'ok %s - %s\n' "$pass_count" "$1"
+}
+
+fail() {
+  printf 'not ok %s - %s\n' "$((pass_count + 1))" "$1" >&2
+  exit 1
+}
+
+assert_contains() {
+  expected=$1
+  file=$2
+  grep -Fq "$expected" "$file" || fail "expected '$expected' in $file"
+}
+
+assert_equals() {
+  expected=$1
+  actual=$2
+  description=$3
+  [ "$expected" = "$actual" ] || fail "$description (expected '$expected', got '$actual')"
+}
+
+new_fixture() {
+  name=$1
+  fixture=$workdir/$name
+  mkdir -p "$fixture/source" "$fixture/state" "$fixture/bin"
+  printf 'dummy-ca\n' > "$fixture/source/ca.crt"
+  cat > "$fixture/source/client.ovpn" <<'EOF'
+client
+dev tun
+proto udp
+remote vpn.example.test 1194 udp # DDNS endpoint
+resolv-retry infinite
+ping 10
+ping-restart 60
+persist-key
+persist-tun
+ca ca.crt
+EOF
+  cat > "$fixture/bin/docker" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_LOG"
+[ "${DOCKER_SHOULD_FAIL:-0}" = 0 ]
+EOF
+  cat > "$fixture/bin/getent" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${GETENT_OUTPUT:-}"
+EOF
+  cat > "$fixture/bin/nslookup" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${NSLOOKUP_OUTPUT:-}"
+EOF
+  chmod +x "$fixture/bin/docker" "$fixture/bin/getent" "$fixture/bin/nslookup"
+  printf '%s\n' "$fixture"
+}
+
+run_subject() {
+  fixture=$1
+  shift
+  PATH="$fixture/bin:$PATH" \
+  STATE_DIR="$fixture/state" \
+  OPENVPN_SOURCE_CONFIG="$fixture/source/client.ovpn" \
+  OPENVPN_RENDERED_CONFIG="$fixture/state/openvpn/client.ovpn" \
+  DDNS_POLL_SECONDS=10 \
+  DDNS_INIT_RETRY_SECONDS=1 \
+  DDNS_HOSTNAME="${DDNS_HOSTNAME:-}" \
+  DDNS_RESOLVER="${DDNS_RESOLVER:-}" \
+  DDNS_OVERRIDE_IPS="${DDNS_OVERRIDE_IPS:-}" \
+  GETENT_OUTPUT="${GETENT_OUTPUT:-}" \
+  NSLOOKUP_OUTPUT="${NSLOOKUP_OUTPUT:-}" \
+  OPENVPN_USER_CONFIGURED="${OPENVPN_USER:+1}" \
+  OPENVPN_PASSWORD_CONFIGURED="${OPENVPN_PASSWORD:+1}" \
+  HTTPPROXY_ENABLED="${HTTPPROXY:-on}" \
+  HTTPPROXY_USER_CONFIGURED="${HTTPPROXY_USER:+1}" \
+  HTTPPROXY_PASSWORD_CONFIGURED="${HTTPPROXY_PASSWORD:+1}" \
+  SOCKS5_USER_CONFIGURED="${SOCKS5_USER:+1}" \
+  SOCKS5_PASSWORD_CONFIGURED="${SOCKS5_PASSWORD:+1}" \
+  PROXY_BIND_ADDRESS="${PROXY_BIND_ADDRESS:-127.0.0.1}" \
+  GLUETUN_CONTAINER_NAME=gluetun-test \
+  GLUETUN_RESTART_TIMEOUT_SECONDS=5 \
+  DOCKER_LOG="$fixture/docker.log" \
+  sh "$subject" "$@"
+}
+
+printf 'TAP version 13\n'
+
+fixture=$(new_fixture validate)
+DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" validate >/dev/null
+pass 'valid profile and environment are accepted'
+
+fixture=$(new_fixture render)
+DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" render 198.51.100.10
+assert_contains 'remote 198.51.100.10 1194 udp # DDNS endpoint' "$fixture/state/openvpn/client.ovpn"
+assert_contains "ca $fixture/source/ca.crt" "$fixture/state/openvpn/client.ovpn"
+pass 'renderer writes IP and absolute referenced-file paths'
+
+fixture=$(new_fixture init)
+DDNS_OVERRIDE_IPS='198.51.100.11,198.51.100.10' run_subject "$fixture" init >/dev/null
+assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" 'init chooses a deterministic address'
+assert_contains 'remote 198.51.100.10 1194 udp' "$fixture/state/openvpn/client.ovpn"
+pass 'init sorts multiple A records and seeds runtime state'
+
+fixture=$(new_fixture default_resolver)
+GETENT_OUTPUT='203.0.113.20 STREAM vpn.example.test
+203.0.113.10 DGRAM vpn.example.test' \
+  DDNS_OVERRIDE_IPS='' run_subject "$fixture" init >/dev/null
+assert_equals '203.0.113.10' "$(cat "$fixture/state/ddns/last-ip")" \
+  'default getent resolver output is parsed and sorted'
+pass 'default container resolver path returns valid IPv4 addresses'
+
+fixture=$(new_fixture custom_resolver)
+NSLOOKUP_OUTPUT='Server: 1.1.1.1
+Address: 1.1.1.1:53
+
+Name: vpn.example.test
+Address: 203.0.113.30' \
+  DDNS_RESOLVER=1.1.1.1 DDNS_OVERRIDE_IPS='' run_subject "$fixture" init >/dev/null
+assert_equals '203.0.113.30' "$(cat "$fixture/state/ddns/last-ip")" \
+  'custom nslookup resolver output is parsed'
+pass 'explicit DDNS resolver path ignores the resolver address itself'
+
+fixture=$(new_fixture stable_rr)
+DDNS_OVERRIDE_IPS='198.51.100.10,198.51.100.11' run_subject "$fixture" init >/dev/null
+DDNS_OVERRIDE_IPS='198.51.100.11,198.51.100.10' run_subject "$fixture" watch-once >/dev/null
+[ ! -e "$fixture/docker.log" ] || fail 'DNS answer ordering must not restart Gluetun'
+pass 'multi-address DNS answer reordering does not flap the tunnel'
+
+fixture=$(new_fixture dns_failure)
+DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+DDNS_OVERRIDE_IPS='' run_subject "$fixture" watch-once >/dev/null
+assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" 'DNS failure preserves last IP'
+[ ! -e "$fixture/docker.log" ] || fail 'DNS failure must not restart Gluetun'
+pass 'transient DNS failure preserves the active tunnel'
+
+fixture=$(new_fixture address_change)
+DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+DDNS_OVERRIDE_IPS=198.51.100.20 run_subject "$fixture" watch-once >/dev/null
+assert_contains 'remote 198.51.100.20 1194 udp' "$fixture/state/openvpn/client.ovpn"
+assert_contains 'container restart --timeout 5 -- gluetun-test' "$fixture/docker.log"
+assert_equals '198.51.100.20' "$(cat "$fixture/state/ddns/last-ip")" 'changed address is committed'
+pass 'DDNS address change atomically renders and restarts Gluetun'
+
+fixture=$(new_fixture profile_change)
+DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+printf 'updated-ca\n' > "$fixture/source/ca.crt"
+DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" watch-once >/dev/null
+assert_contains 'container restart --timeout 5 -- gluetun-test' "$fixture/docker.log"
+pass 'referenced certificate changes trigger a restart at the same IP'
+
+fixture=$(new_fixture restart_failure)
+DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+if DOCKER_SHOULD_FAIL=1 DDNS_OVERRIDE_IPS=198.51.100.20 run_subject "$fixture" watch-once >/dev/null 2>&1; then
+  fail 'watch-once must report a failed Docker restart'
+fi
+assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" 'failed restart must not commit new IP'
+pass 'failed restart retains old state for the next retry'
+
+fixture=$(new_fixture invalid_remote)
+cat >> "$fixture/source/client.ovpn" <<'EOF'
+remote backup.example.test 1194 udp
+EOF
+if DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" validate >/dev/null 2>&1; then
+  fail 'multiple remote directives must be rejected'
+fi
+pass 'ambiguous multi-remote profiles fail fast'
+
+fixture=$(new_fixture missing_reference)
+rm "$fixture/source/ca.crt"
+if DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" validate >/dev/null 2>&1; then
+  fail 'missing referenced files must be rejected'
+fi
+pass 'missing certificate/key references fail fast'
+
+fixture=$(new_fixture invalid_override)
+if DDNS_OVERRIDE_IPS=not-an-ip run_subject "$fixture" validate >/dev/null 2>&1; then
+  fail 'invalid override IP must be rejected'
+fi
+pass 'invalid diagnostic address overrides fail fast'
+
+fixture=$(new_fixture openvpn_auth)
+printf 'auth-user-pass\n' >> "$fixture/source/client.ovpn"
+if DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" validate >/dev/null 2>&1; then
+  fail 'auth-user-pass without Gluetun credentials must be rejected'
+fi
+OPENVPN_USER=vpn-user OPENVPN_PASSWORD=vpn-password DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" validate >/dev/null
+pass 'auth-user-pass requires a complete Gluetun credential pair'
+
+fixture=$(new_fixture helper_proxy_gate)
+if HTTPPROXY_USER=only-user DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" validate >/dev/null 2>&1; then
+  fail 'helper gate must reject partial HTTP credentials'
+fi
+if PROXY_BIND_ADDRESS=0.0.0.0 DDNS_OVERRIDE_IPS=198.51.100.10 \
+  run_subject "$fixture" validate >/dev/null 2>&1; then
+  fail 'helper gate must reject unauthenticated public proxy binding'
+fi
+PROXY_BIND_ADDRESS=0.0.0.0 \
+  HTTPPROXY_USER=http-user HTTPPROXY_PASSWORD=http-password \
+  SOCKS5_USER=socks-user SOCKS5_PASSWORD=socks-password \
+  DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" validate >/dev/null
+pass 'direct Compose helper gate enforces proxy exposure policy'
+
+printf '1..%s\n' "$pass_count"
