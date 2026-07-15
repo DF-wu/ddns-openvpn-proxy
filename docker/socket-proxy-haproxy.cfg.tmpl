@@ -1,0 +1,37 @@
+global
+    log stdout format raw daemon "${LOG_LEVEL}"
+    pidfile /run/haproxy.pid
+    maxconn 256
+
+defaults
+    mode http
+    log global
+    option httplog
+    option dontlognull
+    option http-server-close
+    timeout http-request 10s
+    timeout connect 10s
+    timeout client 30s
+    timeout server 30s
+
+backend docker-socket
+    server docker /var/run/docker.sock
+
+frontend docker-api
+    bind :2375
+
+    # Docker CLI negotiates the API with /_ping before issuing a restart.
+    acl ping_method method GET HEAD
+    acl ping_path path_reg -i ^(/v[0-9.]+)?/_ping$
+
+    # Deliberately exclude stop, kill, start, remove, exec, inspect, and every
+    # collection endpoint. Query parameters (for example ?t=20) are not part
+    # of HAProxy's path fetch, so the exact string match still accepts them.
+    acl restart_method method POST
+    acl restart_path path,regsub(^/v[0-9.]+,) -m str /containers/@RESTART_CONTAINER_NAME@/restart
+
+    http-request allow if ping_method ping_path
+    http-request allow if restart_method restart_path
+    http-request deny
+
+    default_backend docker-socket

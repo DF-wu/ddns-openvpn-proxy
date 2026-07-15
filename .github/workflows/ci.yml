@@ -1,44 +1,57 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, master]
     paths:
       - '.github/workflows/ci.yml'
       - 'docker-compose.yml'
       - '.env.example'
+      - '.markdownlint-cli2.jsonc'
       - 'scripts/**'
       - 'tests/**'
       - 'examples/**'
       - 'Makefile'
+      - 'README.md'
+      - 'docs/**'
   pull_request:
     branches: [main, master]
     paths:
       - '.github/workflows/ci.yml'
       - 'docker-compose.yml'
       - '.env.example'
+      - '.markdownlint-cli2.jsonc'
       - 'scripts/**'
       - 'tests/**'
       - 'examples/**'
       - 'Makefile'
+      - 'README.md'
+      - 'docs/**'
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - name: Validate repository contract
+      - name: Install static analysis tools
         run: |
-          chmod +x scripts/*.sh tests/e2e/*.sh
-          make validate-repo
+          sudo apt-get update
+          sudo apt-get install --yes jq shellcheck
 
-      - name: Run smoke test
+      - name: Check shell scripts
         run: |
-          chmod +x scripts/*.sh tests/e2e/*.sh
-          make smoke
+          shellcheck -s sh scripts/*.sh tests/*.sh
+
+      - name: Validate and test repository
+        run: make check
