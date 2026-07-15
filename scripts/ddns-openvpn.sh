@@ -15,7 +15,10 @@ heartbeat_file=$state_dir/ddns/watcher-heartbeat
 poll_seconds=${DDNS_POLL_SECONDS:-60}
 retry_seconds=${DDNS_INIT_RETRY_SECONDS:-5}
 gluetun_container=${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}
+vproxy_container=${VPROXY_CONTAINER_NAME:-ddns-openvpn-vproxy}
 restart_timeout=${GLUETUN_RESTART_TIMEOUT_SECONDS:-20}
+health_timeout=${GLUETUN_HEALTH_TIMEOUT_SECONDS:-120}
+gluetun_health_url=${GLUETUN_HEALTHCHECK_URL:-http://gluetun:9999}
 
 remote_source_host=
 ddns_hostname=
@@ -309,9 +312,17 @@ validate_common_environment() {
   if ! { is_uint "$restart_timeout" && [ "$restart_timeout" -ge 1 ]; }; then
     die "GLUETUN_RESTART_TIMEOUT_SECONDS must be a positive integer"
   fi
+  if ! { is_uint "$health_timeout" && [ "$health_timeout" -ge 1 ]; }; then
+    die "GLUETUN_HEALTH_TIMEOUT_SECONDS must be a positive integer"
+  fi
   case $gluetun_container in
     ''|-*|*[!A-Za-z0-9_.-]*) die "invalid GLUETUN_CONTAINER_NAME: $gluetun_container" ;;
   esac
+  case $vproxy_container in
+    ''|-*|*[!A-Za-z0-9_.-]*) die "invalid VPROXY_CONTAINER_NAME: $vproxy_container" ;;
+  esac
+  [ "$gluetun_container" != "$vproxy_container" ] ||
+    die "GLUETUN_CONTAINER_NAME and VPROXY_CONTAINER_NAME must be different"
 }
 
 validate_config() {
@@ -528,6 +539,52 @@ restart_gluetun() {
   docker container restart --timeout "$restart_timeout" -- "$gluetun_container" >/dev/null
 }
 
+wait_gluetun_healthy() {
+  deadline=$(($(date -u '+%s') + health_timeout))
+
+  while ! wget -q --spider -T 3 "$gluetun_health_url"; do
+    now=$(date -u '+%s')
+    [ "$now" -lt "$deadline" ] || return 1
+    sleep 1
+  done
+}
+
+restart_vproxy() {
+  docker container restart --timeout "$restart_timeout" -- "$vproxy_container" >/dev/null
+}
+
+wait_vproxy_ready() {
+  deadline=$(($(date -u '+%s') + health_timeout))
+
+  while ! nc -z -w 2 gluetun 1080; do
+    now=$(date -u '+%s')
+    [ "$now" -lt "$deadline" ] || return 1
+    sleep 1
+  done
+}
+
+restart_vpn_stack() {
+  if ! restart_gluetun; then
+    log ERROR "failed to restart Gluetun container=$gluetun_container; will retry"
+    return 1
+  fi
+
+  if ! wait_gluetun_healthy; then
+    log ERROR "Gluetun did not become healthy container=$gluetun_container timeout=${health_timeout}s; will retry"
+    return 1
+  fi
+
+  if ! restart_vproxy; then
+    log ERROR "failed to restart vproxy container=$vproxy_container; will retry"
+    return 1
+  fi
+
+  if ! wait_vproxy_ready; then
+    log ERROR "vproxy did not rejoin the Gluetun network namespace container=$vproxy_container timeout=${health_timeout}s; will retry"
+    return 1
+  fi
+}
+
 watch_once() {
   validate_config
   touch_heartbeat
@@ -550,14 +607,13 @@ watch_once() {
   [ "$selected_ip" = "$previous_ip" ] || reason=address-change
   render_config "$selected_ip"
 
-  if restart_gluetun; then
+  if restart_vpn_stack; then
     write_state "$selected_ip" "$last_ip_file"
     write_state "$current_hash" "$source_hash_file"
-    log INFO "restarted Gluetun vpn_type=$vpn_type reason=$reason hostname=$ddns_hostname old_ip=${previous_ip:-none} new_ip=$selected_ip"
+    log INFO "restarted VPN stack vpn_type=$vpn_type reason=$reason hostname=$ddns_hostname old_ip=${previous_ip:-none} new_ip=$selected_ip gluetun=$gluetun_container vproxy=$vproxy_container"
     return 0
   fi
 
-  log ERROR "failed to restart Gluetun container=$gluetun_container; will retry"
   return 1
 }
 
@@ -578,7 +634,7 @@ healthcheck() {
   heartbeat=$(read_state "$heartbeat_file" || true)
   is_uint "$heartbeat" || exit 1
   now=$(date -u '+%s')
-  maximum_age=$((poll_seconds * 3 + 30))
+  maximum_age=$((poll_seconds * 3 + health_timeout + 30))
   age=$((now - heartbeat))
   [ "$age" -ge 0 ] && [ "$age" -le "$maximum_age" ]
 }
@@ -591,7 +647,7 @@ Commands:
   validate     Validate the selected OpenVPN or WireGuard profile and environment
   render IP    Render the Gluetun-compatible runtime profile with IP
   init         Resolve DDNS and render the initial runtime profile
-  watch        Poll DDNS, render changes, and restart Gluetun
+  watch        Poll DDNS, render changes, and restart the VPN stack
   watch-once   Run one watcher iteration (primarily for diagnostics/tests)
   healthcheck  Check that the watcher loop is making progress
 EOF

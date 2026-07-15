@@ -154,7 +154,9 @@ chmod 600 .env
 | `DDNS_INIT_RETRY_SECONDS` | `5` | positive integer |
 | `DDNS_RESOLVER` | 空 | 指定時必須是 IPv4 DNS server |
 | `GLUETUN_CONTAINER_NAME` | `ddns-openvpn-proxy` | watcher restart target |
+| `VPROXY_CONTAINER_NAME` | `ddns-openvpn-vproxy` | watcher 的第二個 restart target |
 | `GLUETUN_RESTART_TIMEOUT_SECONDS` | `20` | positive integer |
+| `GLUETUN_HEALTH_TIMEOUT_SECONDS` | `120` | restart 後等待 Gluetun healthy 的上限 |
 
 `DDNS_OVERRIDE_IPS` 只供測試與診斷。production 必須留空；可接受以逗號或 whitespace
 分隔的 IPv4 列表。
@@ -270,7 +272,7 @@ helper 使用可搜尋的 key-value 訊息：
 ```text
 2026-07-15T01:23:45Z level=INFO rendered profile vpn_type=wireguard hostname=vpn.example.com ip=203.0.113.10 output=/state/runtime/vpn.conf
 2026-07-15T02:34:56Z level=WARN DNS lookup failed hostname=vpn.example.com; keeping current tunnel
-2026-07-15T03:45:12Z level=INFO restarted Gluetun vpn_type=wireguard reason=address-change hostname=vpn.example.com old_ip=203.0.113.10 new_ip=203.0.113.20
+2026-07-15T03:45:12Z level=INFO restarted VPN stack vpn_type=wireguard reason=address-change hostname=vpn.example.com old_ip=203.0.113.10 new_ip=203.0.113.20 gluetun=ddns-openvpn-proxy vproxy=ddns-openvpn-vproxy
 ```
 
 IP 與 profile 都不變時不寫 INFO，避免每分鐘製造無價值 log；heartbeat 仍會更新。
@@ -339,8 +341,8 @@ tunnel 或其他加密 transport。
 
 source 目錄是 bind mount。替換 `.ovpn`、WireGuard `.conf`、certificate 或 key 後，
 不必手動 restart；watcher 最晚在一個 polling interval 內偵測 fingerprint 改變並
-重啟 Gluetun。環境變數 credentials／WireGuard runtime settings 改變則需 recreate，
-因為 container environment 不會熱更新。
+重啟 Gluetun 與 vproxy。環境變數 credentials／WireGuard runtime settings 改變則需
+recreate，因為 container environment 不會熱更新。
 
 建議使用同 filesystem 的 atomic replace：
 
@@ -362,9 +364,13 @@ docker compose logs -f ddns-watcher gluetun
 ```bash
 docker compose run --rm --no-deps ddns-init init
 docker compose restart gluetun
+until [ "$(docker inspect -f '{{.State.Health.Status}}' \
+  "$(docker compose ps -q gluetun)")" = healthy ]; do sleep 2; done
+docker compose restart vproxy
 ```
 
-第一行重新 render 並提交 state；第二行讓 Gluetun 立即讀取。這會造成短暫中斷。
+第一行重新 render 並提交 state；後三行依 production lifecycle 讓 Gluetun 立即讀取，
+等 healthy 後再重啟 vproxy。這會造成短暫中斷。
 
 ## 升級
 
@@ -397,6 +403,7 @@ docker compose up -d --force-recreate --wait --wait-timeout 180
 long-running services 使用 `restart: unless-stopped`，Docker daemon 重啟後會自動恢復。
 `vpn-state` 保留最後 profile；watcher 啟動後會再次解析 DNS 和 fingerprint。如果 host
 停機期間 DDNS 已改變，最多一個 polling interval 內會 render 並重啟 Gluetun。
+watcher 會等 Gluetun healthy 後同步重啟 vproxy。
 
 ## 停止與移除
 
@@ -525,7 +532,7 @@ docker compose logs docker-socket-proxy ddns-watcher
 
 - `/var/run/docker.sock` 存在且 Docker daemon 可用；
 - socket proxy healthy；
-- `GLUETUN_CONTAINER_NAME` 與 Gluetun `container_name` 相同；
+- `GLUETUN_CONTAINER_NAME`／`VPROXY_CONTAINER_NAME` 與兩個 `container_name` 相同；
 - `ddns-watcher` 同時加入 default 與 `docker-api` networks；
 - SELinux/AppArmor 是否阻擋 socket proxy。
 
@@ -540,15 +547,16 @@ docker compose logs vproxy
 
 ### Port 可連線但沒有流量
 
-listener healthy 不代表 VPN healthy。先看 Gluetun：
+新版 vproxy healthcheck 已同時檢查 Gluetun health、VPN interface 與 route。若 port 可連線
+但請求仍失敗，先看兩個 container 的健康與 log：
 
 ```bash
 docker compose ps gluetun vproxy
 docker compose logs --tail=200 gluetun
 ```
 
-也確認 Gluetun environment 保留 `FIREWALL_INPUT_PORTS: "1080"`；否則 SOCKS5
-sidecar listener 會被 Gluetun firewall 阻擋。
+也確認 Gluetun environment 保留 `FIREWALL_INPUT_PORTS: "1080,9999"`；否則 SOCKS5
+sidecar listener 或 watcher health probe 會被 Gluetun firewall 阻擋。
 
 ### Port 已被使用
 

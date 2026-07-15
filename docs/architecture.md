@@ -28,7 +28,7 @@ Gluetun 重新讀取新的 resolved profile。本專案的責任只限於這個 
 | `gluetun` | `qmcgaw/gluetun:v3.41.1` | long-running | VPN、firewall、health、HTTP proxy |
 | `vproxy` | `ghcr.io/0x676e67/vproxy:v2.5.5` | long-running | SOCKS5 TCP proxy |
 | `ddns-watcher` | 與 init 相同 | long-running | DNS／profile 監看與重啟協調 |
-| `docker-socket-proxy` | `ghcr.io/tecnativa/docker-socket-proxy:v0.4.2` | long-running | 將 Docker API 限制為 restart |
+| `docker-socket-proxy` | `ghcr.io/tecnativa/docker-socket-proxy:v0.4.2` | long-running | 將 Docker API 限制為兩個精確 restart target |
 
 沒有任何 service 使用 `build:`。`ddns-init` 與 `ddns-watcher` 掛載同一份
 `scripts/ddns-openvpn.sh`，用 `init`／`watch` subcommand 分離 lifecycle，因此不需要
@@ -80,9 +80,9 @@ ddns-watcher ─ poll indefinitely
 | DNS 暫時失敗 | 記錄 warning、更新 heartbeat、保留現況 | 無 |
 | 舊 IP 仍在 A record 集合 | 繼續使用舊 IP | 無，避免 round-robin flap |
 | IP 與 fingerprint 都相同 | 只更新 heartbeat | 無 |
-| 舊 IP 消失 | render 新 IP、restart、成功後 commit | 一次受控重連 |
-| `.ovpn`、引用檔案或 `wg0.conf` 變更 | render、restart、成功後 commit | 一次受控重連 |
-| Docker restart 失敗 | runtime profile 已安全寫入，但不 commit state | 現有 process 繼續；下輪重試 |
+| 舊 IP 消失 | render、restart Gluetun、等 healthy、restart vproxy、commit | 一次受控重連 |
+| `.ovpn`、引用檔案或 `wg0.conf` 變更 | 同一套 full-stack restart | 一次受控重連 |
+| health timeout 或任一 restart 失敗 | runtime profile 已安全寫入，但不 commit state | 下輪完整重試 |
 
 ### 為何不在 DNS 暫時失敗時重啟
 
@@ -111,10 +111,26 @@ runtime profile 和狀態檔都先用 `mktemp` 在目標目錄建立，再以 `m
 
 ```text
 resolve → render temporary file → atomic rename → restart Gluetun
-        → commit last-ip + fingerprint only after restart succeeds
+        → wait for Gluetun healthy → restart vproxy → commit last-ip + fingerprint
 ```
 
-若 restart API 失敗，舊的 `last-ip`／fingerprint 不會前進，下一輪自然會再次嘗試。
+只有整條鏈成功才 commit。若 Gluetun restart、health wait 或 vproxy restart 任一步失敗，
+舊的 `last-ip`／fingerprint 都不會前進，下一輪自然會再次嘗試。
+
+### Network namespace lifecycle
+
+`network_mode: service:gluetun` 只規定 vproxy 啟動時加入哪個 namespace，不代表 Gluetun
+被單獨 restart 後 Docker 會同步重建 vproxy。watcher 因此必須在 Gluetun healthy 後明確
+restart vproxy。重啟後，vproxy healthcheck 從共享 namespace 內確認：
+
+1. SOCKS5 `:1080` 正在 listen；
+2. Gluetun `:9999` health endpoint 回傳成功；
+3. OpenVPN 的 `tun0` 或 WireGuard 的 `wg0` 存在；
+4. `ip route get 1.1.1.1` 實際走該 VPN interface。
+
+舊 namespace 只剩 loopback 時，後三項不可能同時成立，因此不會再誤報 healthy。
+watcher 在 commit 前也會從當前 Gluetun service address 連線 `:1080`；只有 listener
+確實出現在新的 Gluetun namespace，full-stack restart 才視為完成。
 
 ## Runtime 資料模型
 
@@ -204,8 +220,9 @@ SOCKS5 client ─ host:1080 ──► vproxy ───────────�
 ```
 
 port 必須 publish 在 `gluetun`，因為 vproxy 沒有自己的 network namespace。
-`FIREWALL_INPUT_PORTS=1080` 讓 Gluetun firewall 接受 sidecar listener；只 publish TCP，
-因此 SOCKS5 UDP ASSOCIATE 不在契約內。
+`FIREWALL_INPUT_PORTS=1080,9999` 讓 Gluetun firewall 接受 sidecar listener，並讓同一個
+internal Compose network 上的 watcher 存取 health endpoint。只有 `1080` publish 到 host；
+`9999` 沒有 host port mapping。SOCKS5 只 publish TCP，因此 UDP ASSOCIATE 不在契約內。
 
 ## Docker API 安全邊界
 
@@ -221,13 +238,14 @@ docker-socket-proxy
    └── mounted restart-only HAProxy policy
          ├── GET/HEAD /_ping
          ├── POST /containers/${GLUETUN_CONTAINER_NAME}/restart
+         ├── POST /containers/${VPROXY_CONTAINER_NAME}/restart
          └── deny every other method and path
 ```
 
 只有 socket proxy service 掛載 host socket，`docker-api` 是 `internal: true` 且沒有
 published port。專案掛載自己的 `docker/socket-proxy-haproxy.cfg.tmpl`，啟動時驗證
 container 名稱並在 tmpfs render 精確 policy，把 target 綁定
-`GLUETUN_CONTAINER_NAME`，不使用上游
+`GLUETUN_CONTAINER_NAME` 與 `VPROXY_CONTAINER_NAME`，不使用上游
 `CONTAINERS`／`ALLOW_RESTARTS` coarse-grained flags；上游的 restart 群組也包含 stop
 與 kill，而 `CONTAINERS + POST` 會開放其他 containers POST endpoints。精確、anchored
 path allowlist 避免這兩種權限擴張。

@@ -42,7 +42,10 @@ x-ddns-common: &ddns-common
     SOCKS5_PASSWORD_CONFIGURED: ${SOCKS5_PASSWORD:+1}
     PROXY_BIND_ADDRESS: ${PROXY_BIND_ADDRESS:-127.0.0.1}
     GLUETUN_CONTAINER_NAME: ${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}
+    VPROXY_CONTAINER_NAME: ${VPROXY_CONTAINER_NAME:-ddns-openvpn-vproxy}
     GLUETUN_RESTART_TIMEOUT_SECONDS: ${GLUETUN_RESTART_TIMEOUT_SECONDS:-20}
+    GLUETUN_HEALTH_TIMEOUT_SECONDS: ${GLUETUN_HEALTH_TIMEOUT_SECONDS:-120}
+    GLUETUN_HEALTHCHECK_URL: http://gluetun:9999
   entrypoint:
     - /bin/sh
     - /opt/ddns/ddns-openvpn.sh
@@ -90,16 +93,18 @@ services:
       WIREGUARD_MTU: ${WIREGUARD_MTU:-1320}
       WIREGUARD_IMPLEMENTATION: ${WIREGUARD_IMPLEMENTATION:-auto}
       HEALTH_RESTART_VPN: "on"
+      HEALTH_SERVER_ADDRESS: :9999
       HTTPPROXY: ${HTTPPROXY:-on}
       HTTPPROXY_LISTENING_ADDRESS: :8888
       HTTPPROXY_USER: ${HTTPPROXY_USER:-}
       HTTPPROXY_PASSWORD: ${HTTPPROXY_PASSWORD:-}
       HTTPPROXY_STEALTH: ${HTTPPROXY_STEALTH:-off}
       # vproxy shares this namespace; Gluetun must admit its listener.
-      FIREWALL_INPUT_PORTS: "1080"
+      FIREWALL_INPUT_PORTS: "1080,9999"
 
   vproxy:
     image: ${VPROXY_IMAGE:-ghcr.io/0x676e67/vproxy:v2.5.5}
+    container_name: ${VPROXY_CONTAINER_NAME:-ddns-openvpn-vproxy}
     network_mode: service:gluetun
     restart: unless-stopped
     depends_on:
@@ -114,6 +119,7 @@ services:
       - /tmp:size=8m,mode=1777
     logging: *default-logging
     environment:
+      VPN_TYPE: ${VPN_TYPE:-openvpn}
       SOCKS5_USER: ${SOCKS5_USER:-}
       SOCKS5_PASSWORD: ${SOCKS5_PASSWORD:-}
       VPROXY_LOG: ${VPROXY_LOG:-info}
@@ -133,7 +139,13 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - nc -z 127.0.0.1 1080
+        - >-
+          interface=tun0;
+          [ "$${VPN_TYPE}" != wireguard ] || interface=wg0;
+          nc -z 127.0.0.1 1080 &&
+          wget -q --spider -T 2 http://127.0.0.1:9999 &&
+          test -d "/sys/class/net/$${interface}" &&
+          ip -4 route get 1.1.1.1 2>/dev/null | grep -q " dev $${interface} "
       interval: 10s
       timeout: 3s
       retries: 3
@@ -160,18 +172,27 @@ services:
       - ./docker/socket-proxy-haproxy.cfg.tmpl:/usr/local/etc/haproxy/restart-only.cfg.tmpl:ro
     environment:
       LOG_LEVEL: warning
-      RESTART_CONTAINER_NAME: ${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}
+      GLUETUN_CONTAINER_NAME: ${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}
+      VPROXY_CONTAINER_NAME: ${VPROXY_CONTAINER_NAME:-ddns-openvpn-vproxy}
     command:
       - /bin/sh
       - -ec
       - |
-        case "$${RESTART_CONTAINER_NAME}" in
-          ""|*[!a-zA-Z0-9_.-]*)
-            echo "ERROR: invalid RESTART_CONTAINER_NAME" >&2
-            exit 64
-            ;;
-        esac
-        sed "s/@RESTART_CONTAINER_NAME@/$${RESTART_CONTAINER_NAME}/g" \
+        for name in "$${GLUETUN_CONTAINER_NAME}" "$${VPROXY_CONTAINER_NAME}"; do
+          case "$${name}" in
+            ""|*[!a-zA-Z0-9_.-]*)
+              echo "ERROR: invalid restart container name" >&2
+              exit 64
+              ;;
+          esac
+        done
+        [ "$${GLUETUN_CONTAINER_NAME}" != "$${VPROXY_CONTAINER_NAME}" ] || {
+          echo "ERROR: restart container names must be different" >&2
+          exit 64
+        }
+        sed \
+          -e "s/@GLUETUN_CONTAINER_NAME@/$${GLUETUN_CONTAINER_NAME}/g" \
+          -e "s/@VPROXY_CONTAINER_NAME@/$${VPROXY_CONTAINER_NAME}/g" \
           /usr/local/etc/haproxy/restart-only.cfg.tmpl \
           > /tmp/restart-only.cfg
         exec haproxy -W -db -f /tmp/restart-only.cfg
@@ -197,6 +218,8 @@ services:
     depends_on:
       gluetun:
         condition: service_started
+      vproxy:
+        condition: service_healthy
       docker-socket-proxy:
         condition: service_healthy
     environment:

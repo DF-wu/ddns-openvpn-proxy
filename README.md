@@ -7,8 +7,8 @@
 Gluetun 的 custom provider 要求 OpenVPN `remote` 或 WireGuard `Endpoint` 在建立
 firewall 前就是 IP，無法直接使用 DDNS hostname。本專案只補上這個缺口：解析
 hostname、產生 Gluetun 可讀的 runtime profile，並在 A record 或 profile／憑證改變
-時安全重啟 Gluetun。VPN、kill switch、連線健康檢查、HTTP proxy 與 SOCKS5 都交給
-成熟的上游服務。
+時安全重啟 Gluetun，等 tunnel 恢復健康後再重啟共享其 network namespace 的 vproxy。
+VPN、kill switch、連線健康檢查、HTTP proxy 與 SOCKS5 都交給成熟的上游服務。
 
 ![DDNS VPN Proxy architecture](docs/assets/architecture.svg)
 
@@ -22,12 +22,12 @@ hostname、產生 Gluetun 可讀的 runtime profile，並在 A record 或 profil
 - **雙 VPN 協定**：以 `VPN_TYPE=openvpn|wireguard` 選擇協定，共用相同 DDNS、原子
   寫入與安全 restart lifecycle。
 - **自動恢復**：DDNS IP、`.ovpn`、`wg0.conf` 或 OpenVPN 引用的憑證／金鑰改變後，
-  原子更新 runtime profile，再重啟 Gluetun 重新連線。
+  原子更新 runtime profile，依序重啟 Gluetun、等待 healthy、重啟 vproxy。
 - **不因 DNS round-robin 抖動**：舊 IP 仍在 A record 集合內時繼續使用；只有
   舊 IP 消失才切換。
 - **縮小 Docker socket 權限**：watcher 不直接掛載 socket；精確 HAProxy allowlist
-  只允許內部網路的 ping 與指定 Gluetun container restart，其他 container 以及
-  start、stop、kill、remove、inspect 與其餘 Docker API 全部拒絕。
+  只允許內部網路的 ping 與指定 Gluetun／vproxy container restart，其他 container
+  以及 start、stop、kill、remove、inspect 與其餘 Docker API 全部拒絕。
 - **安全預設**：HTTP 與 SOCKS5 port 只綁定 `127.0.0.1`；所有非 VPN container 先
   `cap_drop: ALL`，只有 bind-mount readers 加回 `DAC_READ_SEARCH`，全部啟用
   `no-new-privileges`。
@@ -222,10 +222,13 @@ curl --socks5-hostname 127.0.0.1:1080 \
 3. IP 與 fingerprint 都未改變時只更新 heartbeat，不重啟。
 4. 有變化時先在 named volume 內寫入暫存檔，再用 atomic rename 取代 runtime
    profile。
-5. watcher 經 `docker-socket-proxy` 呼叫 Gluetun restart。
-6. restart 成功後才提交新的 `last-ip` 與 fingerprint；失敗則保留舊狀態，下一輪
-   繼續嘗試。
-7. Gluetun 重啟後讀取新 IP，內建 health auto-healing 持續監控 tunnel。
+5. watcher 經 `docker-socket-proxy` 呼叫 Gluetun restart，再輪詢 Gluetun 自己的 health
+   endpoint。
+6. Gluetun 恢復 healthy 後 restart vproxy，並從 Gluetun service address 確認 `:1080`
+   listener 已出現在新的 network namespace。
+7. 兩個 restart 都成功後才提交新的 `last-ip` 與 fingerprint；任一步失敗都保留舊
+   狀態，下一輪完整重試。
+8. vproxy healthcheck 同時驗證 SOCKS listener、Gluetun health、VPN interface 與 route。
 
 ## 常用操作
 

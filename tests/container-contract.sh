@@ -36,12 +36,15 @@ export VPN_CONFIG_DIR="$source_dir"
 export VPN_CONFIG_FILE=custom.ovpn
 export DDNS_OVERRIDE_IPS=198.51.100.10
 export GLUETUN_CONTAINER_NAME="$target"
+export VPROXY_CONTAINER_NAME="$proxy_target"
 
 compose() {
   docker compose -f "$repo_root/docker-compose.yml" -p "$project" "$@"
 }
 
 compose up -d --wait --wait-timeout 60 docker-socket-proxy >/dev/null
+compose run --rm --no-deps --entrypoint /bin/sh ddns-watcher -ec \
+  'command -v wget >/dev/null && command -v nc >/dev/null' >/dev/null
 compose run --rm --no-deps ddns-init validate >/dev/null
 compose run --rm --no-deps ddns-init init >/dev/null
 
@@ -58,10 +61,32 @@ compose run --rm --no-deps --entrypoint /bin/sh ddns-init -ec \
 docker run -d --name "$target" alpine:3.22 sleep 300 >/dev/null
 docker run -d --name "$other_target" alpine:3.22 sleep 300 >/dev/null
 
+vproxy_image=$(compose config --format json | jq -r '.services.vproxy.image')
+docker run -d --name "$proxy_target" \
+  --network "container:$target" \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  --tmpfs /tmp:size=8m,mode=1777 \
+  --entrypoint /bin/sh "$vproxy_image" -ec \
+  'exec /bin/vproxy run --bind 0.0.0.0:1080 socks5' >/dev/null
+
 restarted=$(compose run --rm --no-deps --entrypoint docker ddns-watcher \
   container restart --timeout 2 -- "$target")
 [ "$restarted" = "$target" ] || {
-  printf 'ERROR: Restricted Docker API did not restart the test container.\n' >&2
+  printf 'ERROR: Restricted Docker API did not restart the Gluetun target.\n' >&2
+  exit 1
+}
+
+restarted=$(compose run --rm --no-deps --entrypoint docker ddns-watcher \
+  container restart --timeout 2 -- "$proxy_target")
+[ "$restarted" = "$proxy_target" ] || {
+  printf 'ERROR: Restricted Docker API did not restart the vproxy target.\n' >&2
+  exit 1
+}
+
+gluetun_netns=$(docker exec "$target" readlink /proc/self/ns/net)
+vproxy_netns=$(docker exec "$proxy_target" readlink /proc/self/ns/net)
+[ "$gluetun_netns" = "$vproxy_netns" ] || {
+  printf 'ERROR: Restarted vproxy did not rejoin the Gluetun network namespace.\n' >&2
   exit 1
 }
 
@@ -77,18 +102,13 @@ assert_docker_denied() {
 }
 
 assert_docker_denied inspect container inspect "$target"
+assert_docker_denied vproxy-inspect container inspect "$proxy_target"
 assert_docker_denied other-restart container restart --timeout 2 -- "$other_target"
 assert_docker_denied stop container stop "$target"
+assert_docker_denied vproxy-stop container stop "$proxy_target"
 assert_docker_denied kill container kill "$target"
 assert_docker_denied pause container pause "$target"
 assert_docker_denied remove container rm --force "$target"
-
-vproxy_image=$(compose config --format json | jq -r '.services.vproxy.image')
-docker run -d --name "$proxy_target" \
-  --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-  --tmpfs /tmp:size=8m,mode=1777 \
-  --entrypoint /bin/sh "$vproxy_image" -ec \
-  'exec /bin/vproxy run --bind 0.0.0.0:1080 socks5' >/dev/null
 
 attempt=1
 while ! docker exec "$proxy_target" nc -z 127.0.0.1 1080; do
@@ -100,4 +120,7 @@ while ! docker exec "$proxy_target" nc -z 127.0.0.1 1080; do
   sleep 1
 done
 
-printf 'Container contract test passed (OpenVPN/WireGuard helper, hardened vproxy, restart-only API).\n'
+docker exec "$proxy_target" /bin/sh -ec \
+  'command -v wget >/dev/null && command -v ip >/dev/null && command -v grep >/dev/null'
+
+printf 'Container contract test passed (helper, paired namespace, hardened health tools, two-target restart-only API).\n'

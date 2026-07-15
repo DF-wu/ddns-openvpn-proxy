@@ -51,7 +51,12 @@ EOF
   cat > "$fixture/bin/docker" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$DOCKER_LOG"
-[ "${DOCKER_SHOULD_FAIL:-0}" = 0 ]
+[ "${DOCKER_SHOULD_FAIL:-0}" = 0 ] || exit 1
+last_argument=
+for argument do
+  last_argument=$argument
+done
+[ "${DOCKER_FAIL_CONTAINER:-}" != "$last_argument" ]
 EOF
   cat > "$fixture/bin/getent" <<'EOF'
 #!/bin/sh
@@ -61,7 +66,18 @@ EOF
 #!/bin/sh
 printf '%s\n' "${NSLOOKUP_OUTPUT:-}"
 EOF
-  chmod +x "$fixture/bin/docker" "$fixture/bin/getent" "$fixture/bin/nslookup"
+  cat > "$fixture/bin/wget" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$WGET_LOG"
+[ "${WGET_SHOULD_FAIL:-0}" = 0 ]
+EOF
+  cat > "$fixture/bin/nc" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$NC_LOG"
+[ "${NC_SHOULD_FAIL:-0}" = 0 ]
+EOF
+  chmod +x "$fixture/bin/docker" "$fixture/bin/getent" "$fixture/bin/nslookup" \
+    "$fixture/bin/wget" "$fixture/bin/nc"
   printf '%s\n' "$fixture"
 }
 
@@ -112,8 +128,12 @@ run_subject() {
   SOCKS5_PASSWORD_CONFIGURED="${SOCKS5_PASSWORD:+1}" \
   PROXY_BIND_ADDRESS="${PROXY_BIND_ADDRESS:-127.0.0.1}" \
   GLUETUN_CONTAINER_NAME=gluetun-test \
+  VPROXY_CONTAINER_NAME=vproxy-test \
   GLUETUN_RESTART_TIMEOUT_SECONDS=5 \
+  GLUETUN_HEALTH_TIMEOUT_SECONDS="${GLUETUN_HEALTH_TIMEOUT_SECONDS:-5}" \
   DOCKER_LOG="$fixture/docker.log" \
+  WGET_LOG="$fixture/wget.log" \
+  NC_LOG="$fixture/nc.log" \
   sh "$subject" "$@"
 }
 
@@ -162,25 +182,50 @@ pass 'multi-address DNS answer reordering does not flap the tunnel'
 
 fixture=$(new_fixture dns_failure)
 DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
-DDNS_OVERRIDE_IPS='' run_subject "$fixture" watch-once >/dev/null
+profile_before=$(cat "$fixture/state/runtime/vpn.conf")
+profile_inode_before=$(stat -c %i "$fixture/state/runtime/vpn.conf")
+hash_before=$(cat "$fixture/state/ddns/source.sha256")
+hash_inode_before=$(stat -c %i "$fixture/state/ddns/source.sha256")
+last_ip_inode_before=$(stat -c %i "$fixture/state/ddns/last-ip")
+GETENT_OUTPUT='not-an-ip STREAM vpn.example.test
+999.51.100.10 DGRAM vpn.example.test' \
+  DDNS_OVERRIDE_IPS='' run_subject "$fixture" watch-once >/dev/null
 assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" 'DNS failure preserves last IP'
+assert_equals "$profile_before" "$(cat "$fixture/state/runtime/vpn.conf")" \
+  'DNS failure preserves the rendered profile'
+assert_equals "$profile_inode_before" "$(stat -c %i "$fixture/state/runtime/vpn.conf")" \
+  'DNS failure does not replace the rendered profile'
+assert_equals "$hash_before" "$(cat "$fixture/state/ddns/source.sha256")" \
+  'DNS failure preserves the source fingerprint'
+assert_equals "$hash_inode_before" "$(stat -c %i "$fixture/state/ddns/source.sha256")" \
+  'DNS failure does not replace the source fingerprint state'
+assert_equals "$last_ip_inode_before" "$(stat -c %i "$fixture/state/ddns/last-ip")" \
+  'DNS failure does not replace last IP state'
 [ ! -e "$fixture/docker.log" ] || fail 'DNS failure must not restart Gluetun'
-pass 'transient DNS failure preserves the active tunnel'
+pass 'empty or invalid DNS answers preserve profile, state, and active tunnel'
 
 fixture=$(new_fixture address_change)
 DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+old_profile_inode=$(stat -c %i "$fixture/state/runtime/vpn.conf")
 DDNS_OVERRIDE_IPS=198.51.100.20 run_subject "$fixture" watch-once >/dev/null
 assert_contains 'remote 198.51.100.20 1194 udp' "$fixture/state/runtime/vpn.conf"
 assert_contains 'container restart --timeout 5 -- gluetun-test' "$fixture/docker.log"
+assert_contains 'container restart --timeout 5 -- vproxy-test' "$fixture/docker.log"
+assert_equals 'container restart --timeout 5 -- gluetun-test
+container restart --timeout 5 -- vproxy-test' "$(cat "$fixture/docker.log")" \
+  'Gluetun must restart before vproxy'
+[ "$old_profile_inode" != "$(stat -c %i "$fixture/state/runtime/vpn.conf")" ] ||
+  fail 'changed profile must be installed with an atomic rename'
 assert_equals '198.51.100.20' "$(cat "$fixture/state/ddns/last-ip")" 'changed address is committed'
-pass 'DDNS address change atomically renders and restarts Gluetun'
+pass 'DDNS address change atomically renders and restarts Gluetun then vproxy'
 
 fixture=$(new_fixture profile_change)
 DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
 printf 'updated-ca\n' > "$fixture/source/ca.crt"
 DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" watch-once >/dev/null
 assert_contains 'container restart --timeout 5 -- gluetun-test' "$fixture/docker.log"
-pass 'referenced certificate changes trigger a restart at the same IP'
+assert_contains 'container restart --timeout 5 -- vproxy-test' "$fixture/docker.log"
+pass 'referenced certificate changes restart both containers at the same IP'
 
 fixture=$(new_fixture restart_failure)
 DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
@@ -189,6 +234,38 @@ if DOCKER_SHOULD_FAIL=1 DDNS_OVERRIDE_IPS=198.51.100.20 run_subject "$fixture" w
 fi
 assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" 'failed restart must not commit new IP'
 pass 'failed restart retains old state for the next retry'
+
+fixture=$(new_fixture health_timeout)
+DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+if WGET_SHOULD_FAIL=1 GLUETUN_HEALTH_TIMEOUT_SECONDS=1 \
+  DDNS_OVERRIDE_IPS=198.51.100.20 run_subject "$fixture" watch-once >/dev/null 2>&1; then
+  fail 'watch-once must fail when Gluetun does not become healthy'
+fi
+assert_equals 'container restart --timeout 5 -- gluetun-test' "$(cat "$fixture/docker.log")" \
+  'vproxy must not restart before Gluetun is healthy'
+assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" \
+  'health timeout must not commit new IP'
+pass 'Gluetun health timeout leaves vproxy and committed state untouched'
+
+fixture=$(new_fixture vproxy_restart_failure)
+DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+if DOCKER_FAIL_CONTAINER=vproxy-test DDNS_OVERRIDE_IPS=198.51.100.20 \
+  run_subject "$fixture" watch-once >/dev/null 2>&1; then
+  fail 'watch-once must report a failed vproxy restart'
+fi
+assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" \
+  'failed vproxy restart must not commit new IP'
+pass 'failed vproxy restart retains old state for a full-stack retry'
+
+fixture=$(new_fixture vproxy_namespace_failure)
+DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+if NC_SHOULD_FAIL=1 GLUETUN_HEALTH_TIMEOUT_SECONDS=1 \
+  DDNS_OVERRIDE_IPS=198.51.100.20 run_subject "$fixture" watch-once >/dev/null 2>&1; then
+  fail 'watch-once must fail when vproxy does not rejoin the Gluetun namespace'
+fi
+assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" \
+  'vproxy namespace failure must not commit new IP'
+pass 'missing vproxy listener in the Gluetun namespace retains old state'
 
 fixture=$(new_fixture invalid_remote)
 cat >> "$fixture/source/client.ovpn" <<'EOF'
@@ -272,7 +349,8 @@ VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.20 \
   run_subject "$fixture" watch-once >/dev/null
 assert_contains 'Endpoint = 198.51.100.20:51820' "$fixture/state/runtime/vpn.conf"
 assert_contains 'container restart --timeout 5 -- gluetun-test' "$fixture/docker.log"
-pass 'WireGuard DDNS address change renders and restarts Gluetun'
+assert_contains 'container restart --timeout 5 -- vproxy-test' "$fixture/docker.log"
+pass 'WireGuard DDNS address change renders and restarts both containers'
 
 fixture=$(new_wireguard_fixture wireguard_profile_change)
 VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
@@ -282,7 +360,8 @@ sed -i 's/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=/DDDDDDDDDDDDDDDDDDDDDDDDD
 VPN_TYPE=wireguard DDNS_OVERRIDE_IPS=198.51.100.10 \
   run_subject "$fixture" watch-once >/dev/null
 assert_contains 'container restart --timeout 5 -- gluetun-test' "$fixture/docker.log"
-pass 'WireGuard profile changes trigger a restart at the same IP'
+assert_contains 'container restart --timeout 5 -- vproxy-test' "$fixture/docker.log"
+pass 'WireGuard profile changes restart both containers at the same IP'
 
 fixture=$(new_wireguard_fixture wireguard_multiple_peers)
 cat >> "$fixture/source/wg0.conf" <<'EOF'

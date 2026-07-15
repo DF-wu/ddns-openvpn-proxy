@@ -28,10 +28,12 @@ frontend docker-api
     # collection endpoint. Query parameters (for example ?t=20) are not part
     # of HAProxy's path fetch, so the exact string match still accepts them.
     acl restart_method method POST
-    acl restart_path path,regsub(^/v[0-9.]+,) -m str /containers/@RESTART_CONTAINER_NAME@/restart
+    acl gluetun_restart_path path,regsub(^/v[0-9.]+,) -m str /containers/@GLUETUN_CONTAINER_NAME@/restart
+    acl vproxy_restart_path path,regsub(^/v[0-9.]+,) -m str /containers/@VPROXY_CONTAINER_NAME@/restart
 
     http-request allow if ping_method ping_path
-    http-request allow if restart_method restart_path
+    http-request allow if restart_method gluetun_restart_path
+    http-request allow if restart_method vproxy_restart_path
     http-request deny
 
     default_backend docker-socket

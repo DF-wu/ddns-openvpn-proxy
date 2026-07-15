@@ -59,13 +59,32 @@ assert_jq '.services.gluetun.depends_on."ddns-init".condition == "service_comple
   'Gluetun must wait for successful initial rendering'
 assert_jq '.services.vproxy.network_mode == "service:gluetun"' \
   'vproxy must share Gluetun network namespace'
-assert_jq '.services.gluetun.environment.FIREWALL_INPUT_PORTS == "1080"' \
-  'Gluetun firewall must admit the SOCKS5 listener'
+assert_jq '.services.vproxy.container_name ==
+             .services."ddns-watcher".environment.VPROXY_CONTAINER_NAME and
+           .services.vproxy.environment.VPN_TYPE == .services.gluetun.environment.VPN_TYPE' \
+  'watcher target and VPN type must match vproxy'
+assert_jq '.services.gluetun.environment.HEALTH_SERVER_ADDRESS == ":9999" and
+           (.services.gluetun.environment.FIREWALL_INPUT_PORTS | split(",") |
+             (index("1080") != null and index("9999") != null))' \
+  'Gluetun firewall must admit the SOCKS5 listener and internal health server'
+# shellcheck disable=SC2016 # Compose preserves the escaped container-shell variable.
+assert_jq '(.services.vproxy.healthcheck.test[1] |
+             contains("127.0.0.1:9999") and
+             contains("/sys/class/net/") and
+             contains("ip -4 route get") and
+             contains("dev $${interface}"))' \
+  'vproxy healthcheck must verify Gluetun health, the VPN interface, and VPN route'
+assert_jq '.services."ddns-watcher".depends_on.vproxy.condition == "service_healthy"' \
+  'watcher must start only after the initial vproxy namespace is healthy'
 assert_jq '.services."ddns-watcher".environment.DOCKER_HOST == "tcp://docker-socket-proxy:2375"' \
   'watcher must use the restricted Docker API proxy'
-assert_jq '.services."docker-socket-proxy".environment.RESTART_CONTAINER_NAME ==
-           .services.gluetun.container_name' \
-  'Docker API proxy must restrict restart to the configured Gluetun container'
+assert_jq '.services."docker-socket-proxy".environment.GLUETUN_CONTAINER_NAME ==
+             .services.gluetun.container_name and
+           .services."docker-socket-proxy".environment.VPROXY_CONTAINER_NAME ==
+             .services.vproxy.container_name and
+           .services."ddns-watcher".environment.GLUETUN_CONTAINER_NAME ==
+             .services.gluetun.container_name' \
+  'Docker API proxy must restrict restart to the configured Gluetun and vproxy containers'
 assert_jq 'all([.services."ddns-init", .services."ddns-watcher"][];
            (.environment | has("OPENVPN_USER") | not) and
            (.environment | has("OPENVPN_PASSWORD") | not) and
@@ -89,6 +108,9 @@ assert_jq '.services."docker-socket-proxy".command[0:2] == ["/bin/sh", "-ec"] an
            any(.services."docker-socket-proxy".volumes[];
              .target == "/usr/local/etc/haproxy/restart-only.cfg.tmpl" and
              .read_only == true) and
+           (.services."docker-socket-proxy".command[2] |
+             contains("@GLUETUN_CONTAINER_NAME@") and
+             contains("@VPROXY_CONTAINER_NAME@")) and
            (.services."docker-socket-proxy".environment | has("CONTAINERS") | not) and
            (.services."docker-socket-proxy".environment | has("POST") | not) and
            (.services."docker-socket-proxy".environment | has("ALLOW_RESTARTS") | not)' \
