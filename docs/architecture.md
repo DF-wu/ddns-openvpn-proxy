@@ -193,16 +193,23 @@ ddns-watcher
 internal docker-api network
    ▼
 docker-socket-proxy
-   ├── CONTAINERS=1
-   ├── POST=1
-   ├── ALLOW_RESTARTS=1
-   ├── ALLOW_START=0
-   └── ALLOW_STOP=0
+   └── mounted restart-only HAProxy policy
+         ├── GET/HEAD /_ping
+         ├── POST /containers/${GLUETUN_CONTAINER_NAME}/restart
+         └── deny every other method and path
 ```
 
 只有 socket proxy service 掛載 host socket，`docker-api` 是 `internal: true` 且沒有
-published port。這大幅縮小能力，但 restart API 仍可重啟 daemon 上其他已知名稱的
-container；因此 socket proxy 仍屬敏感控制面，不應讓其他 container 加入該 network。
+published port。專案掛載自己的 `docker/socket-proxy-haproxy.cfg.tmpl`，啟動時驗證
+container 名稱並在 tmpfs render 精確 policy，把 target 綁定
+`GLUETUN_CONTAINER_NAME`，不使用上游
+`CONTAINERS`／`ALLOW_RESTARTS` coarse-grained flags；上游的 restart 群組也包含 stop
+與 kill，而 `CONTAINERS + POST` 會開放其他 containers POST endpoints。精確、anchored
+path allowlist 避免這兩種權限擴張。
+
+template 刻意保留 executable bit，確保在 restrictive umask checkout 後仍能被
+`cap_drop: ALL` 的 proxy 讀取；它只會作為 HAProxy config template 載入，不會被執行。
+socket proxy 仍屬敏感控制面，不應讓其他 container 加入該 network。
 
 ## Container hardening
 

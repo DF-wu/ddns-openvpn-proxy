@@ -47,7 +47,8 @@ make validate-compose
 ### Security invariant
 
 - 只有 socket proxy 可以掛 `/var/run/docker.sock`；
-- socket proxy 只允許 `CONTAINERS + POST + ALLOW_RESTARTS`，明確拒絕 start／stop；
+- socket proxy 必須載入唯讀的精確 HAProxy policy，不得依賴上游 coarse-grained
+  `CONTAINERS`／`ALLOW_RESTARTS` flags；
 - 所有非 Gluetun service 必須 `cap_drop: [ALL]`；
 - 所有 service 必須 `no-new-privileges:true`；
 - HTTP／SOCKS5 credentials 不可只設定一半；
@@ -95,13 +96,14 @@ make test-container
 
 `tests/container-contract.sh` 會建立隔離的暫時 Compose project，完成下列驗證：
 
-1. `docker-socket-proxy:v0.4.2` 在 `read_only`、`cap_drop: ALL` 與 tmpfs 設定下能
-   healthy；
+1. `docker-socket-proxy:v0.4.2` 在 `read_only`、`cap_drop: ALL`、tmpfs 與自訂
+   restart-only HAProxy policy 下能 healthy；
 2. `docker:29.6.1-cli-alpine3.24` 在沒有額外 package 的情況下可讀取 `0755`
    mounted POSIX script，以及 host UID 擁有的 `0600` source profile；
 3. stock helper 可 validate 與 init render；
 4. watcher 的 Docker client 可經 internal socket proxy restart 暫時 Alpine container；
-5. 同一路徑呼叫 `docker container stop` 必須收到拒絕；
+5. 同一路徑不得 restart 非目標 container，呼叫目標的 inspect、stop、kill、pause
+   與 remove 也必須全部收到拒絕；
 6. vproxy 在 read-only、drop-all、no-new-privileges 下仍可建立 SOCKS5 listener；
 7. trap 清除暫時 container、networks 與 volumes。
 

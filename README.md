@@ -22,8 +22,9 @@ kill switch、連線健康檢查、HTTP proxy 與 SOCKS5 都交給成熟的上�
   profile，再重啟 Gluetun 重新連線。
 - **不因 DNS round-robin 抖動**：舊 IP 仍在 A record 集合內時繼續使用；只有
   舊 IP 消失才切換。
-- **縮小 Docker socket 權限**：watcher 不直接掛載 socket，只能經內部網路呼叫
-  restart API；start、stop 與其他 Docker API 預設拒絕。
+- **縮小 Docker socket 權限**：watcher 不直接掛載 socket；精確 HAProxy allowlist
+  只允許內部網路的 ping 與指定 Gluetun container restart，其他 container 以及
+  start、stop、kill、remove、inspect 與其餘 Docker API 全部拒絕。
 - **安全預設**：HTTP 與 SOCKS5 port 只綁定 `127.0.0.1`；所有非 VPN container
   移除 Linux capabilities，全部啟用 `no-new-privileges`。
 - **雙 proxy**：Gluetun 內建 HTTP proxy `:8888`，vproxy 提供 SOCKS5 `:1080`；

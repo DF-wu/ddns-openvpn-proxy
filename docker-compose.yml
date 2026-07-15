@@ -149,13 +149,24 @@ services:
     logging: *default-logging
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./docker/socket-proxy-haproxy.cfg.tmpl:/usr/local/etc/haproxy/restart-only.cfg.tmpl:ro
     environment:
-      CONTAINERS: "1"
-      POST: "1"
-      ALLOW_RESTARTS: "1"
-      ALLOW_START: "0"
-      ALLOW_STOP: "0"
       LOG_LEVEL: warning
+      RESTART_CONTAINER_NAME: ${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        case "$${RESTART_CONTAINER_NAME}" in
+          ""|*[!a-zA-Z0-9_.-]*)
+            echo "ERROR: invalid RESTART_CONTAINER_NAME" >&2
+            exit 64
+            ;;
+        esac
+        sed "s/@RESTART_CONTAINER_NAME@/$${RESTART_CONTAINER_NAME}/g" \
+          /usr/local/etc/haproxy/restart-only.cfg.tmpl \
+          > /tmp/restart-only.cfg
+        exec haproxy -W -db -f /tmp/restart-only.cfg
     networks:
       - docker-api
     healthcheck:

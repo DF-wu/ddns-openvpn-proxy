@@ -4,6 +4,7 @@ set -eu
 repo_root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 project=ddns-openvpn-contract-$$
 target=ddns-openvpn-restart-test-$$
+other_target=ddns-openvpn-denied-test-$$
 proxy_target=ddns-openvpn-vproxy-test-$$
 source_dir=$(mktemp -d)
 
@@ -11,6 +12,7 @@ cleanup() {
   docker compose -f "$repo_root/docker-compose.yml" -p "$project" \
     down --remove-orphans --volumes >/dev/null 2>&1 || true
   docker rm -f "$target" >/dev/null 2>&1 || true
+  docker rm -f "$other_target" >/dev/null 2>&1 || true
   docker rm -f "$proxy_target" >/dev/null 2>&1 || true
   rm -rf "$source_dir"
 }
@@ -22,6 +24,7 @@ chmod 600 "$source_dir/custom.ovpn"
 export OPENVPN_CONFIG_DIR="$source_dir"
 export OPENVPN_CONFIG_FILE=custom.ovpn
 export DDNS_OVERRIDE_IPS=198.51.100.10
+export GLUETUN_CONTAINER_NAME="$target"
 
 compose() {
   docker compose -f "$repo_root/docker-compose.yml" -p "$project" "$@"
@@ -32,6 +35,7 @@ compose run --rm --no-deps ddns-init validate >/dev/null
 compose run --rm --no-deps ddns-init init >/dev/null
 
 docker run -d --name "$target" alpine:3.22 sleep 300 >/dev/null
+docker run -d --name "$other_target" alpine:3.22 sleep 300 >/dev/null
 
 restarted=$(compose run --rm --no-deps --entrypoint docker ddns-watcher \
   container restart --timeout 2 -- "$target")
@@ -40,11 +44,23 @@ restarted=$(compose run --rm --no-deps --entrypoint docker ddns-watcher \
   exit 1
 }
 
-if compose run --rm --no-deps --entrypoint docker ddns-watcher \
-  container stop "$target" >/dev/null 2>&1; then
-  printf 'ERROR: Restricted Docker API unexpectedly allowed container stop.\n' >&2
-  exit 1
-fi
+assert_docker_denied() {
+  operation=$1
+  shift
+  if compose run --rm --no-deps --entrypoint docker ddns-watcher \
+    "$@" >/dev/null 2>&1; then
+    printf 'ERROR: Restricted Docker API unexpectedly allowed container %s.\n' \
+      "$operation" >&2
+    exit 1
+  fi
+}
+
+assert_docker_denied inspect container inspect "$target"
+assert_docker_denied other-restart container restart --timeout 2 -- "$other_target"
+assert_docker_denied stop container stop "$target"
+assert_docker_denied kill container kill "$target"
+assert_docker_denied pause container pause "$target"
+assert_docker_denied remove container rm --force "$target"
 
 vproxy_image=$(compose config --format json | jq -r '.services.vproxy.image')
 docker run -d --name "$proxy_target" \

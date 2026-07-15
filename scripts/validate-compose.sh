@@ -46,6 +46,9 @@ assert_jq '.services.gluetun.environment.FIREWALL_INPUT_PORTS == "1080"' \
   'Gluetun firewall must admit the SOCKS5 listener'
 assert_jq '.services."ddns-watcher".environment.DOCKER_HOST == "tcp://docker-socket-proxy:2375"' \
   'watcher must use the restricted Docker API proxy'
+assert_jq '.services."docker-socket-proxy".environment.RESTART_CONTAINER_NAME ==
+           .services.gluetun.container_name' \
+  'Docker API proxy must restrict restart to the configured Gluetun container'
 assert_jq 'all([.services."ddns-init", .services."ddns-watcher"][];
            (.environment | has("OPENVPN_USER") | not) and
            (.environment | has("OPENVPN_PASSWORD") | not) and
@@ -58,12 +61,16 @@ assert_jq '.networks."docker-api".internal == true' \
   'Docker API network must be internal'
 assert_jq '[.services | to_entries[] | select(any(.value.volumes[]?; .source == "/var/run/docker.sock")) | .key] == ["docker-socket-proxy"]' \
   'only docker-socket-proxy may mount the host Docker socket'
-assert_jq '.services."docker-socket-proxy".environment.CONTAINERS == "1" and
-           .services."docker-socket-proxy".environment.POST == "1" and
-           .services."docker-socket-proxy".environment.ALLOW_RESTARTS == "1" and
-           .services."docker-socket-proxy".environment.ALLOW_START == "0" and
-           .services."docker-socket-proxy".environment.ALLOW_STOP == "0"' \
-  'Docker API proxy must expose restart but not start/stop operations'
+assert_jq '.services."docker-socket-proxy".command[0:2] == ["/bin/sh", "-ec"] and
+           (.services."docker-socket-proxy".command[2] |
+             contains("/usr/local/etc/haproxy/restart-only.cfg.tmpl")) and
+           any(.services."docker-socket-proxy".volumes[];
+             .target == "/usr/local/etc/haproxy/restart-only.cfg.tmpl" and
+             .read_only == true) and
+           (.services."docker-socket-proxy".environment | has("CONTAINERS") | not) and
+           (.services."docker-socket-proxy".environment | has("POST") | not) and
+           (.services."docker-socket-proxy".environment | has("ALLOW_RESTARTS") | not)' \
+  'Docker API proxy must load the read-only restart-only HAProxy policy'
 assert_jq 'all(.services | to_entries[] | select(.key != "gluetun"); .value.cap_drop == ["ALL"])' \
   'all non-VPN services must drop Linux capabilities'
 assert_jq '.services."ddns-init".cap_add == ["DAC_READ_SEARCH"] and
