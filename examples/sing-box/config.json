@@ -1,0 +1,15 @@
+{
+  "outbounds": [
+    {
+      "type": "trojan",
+      "tag": "vpn",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "password": "REPLACE_WITH_YOUR_TROJAN_PASSWORD",
+      "tls": {
+        "enabled": true,
+        "server_name": "vpn.example.com"
+      }
+    }
+  ]
+}
