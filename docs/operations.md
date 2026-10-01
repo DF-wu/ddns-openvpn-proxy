@@ -2,14 +2,10 @@
 
 ## 需求
 
-- Linux host
-- Docker Engine 24 或更新版本
-- Docker Compose v2.20 或更新版本
-- `/dev/net/tun`
+- Linux host、Docker Engine 24+、Docker Compose v2.20+
+- Gluetun／OpenConnect backend：`/dev/net/tun`
 - 可存取 Docker Hub 與 GHCR
-- 建議使用 `make`，但不是必要條件
-
-檢查：
+- 建議 `make` 與 `jq`（`make validate-compose` 需要），非必要
 
 ```bash
 docker version
@@ -17,267 +13,207 @@ docker compose version
 test -c /dev/net/tun && echo 'TUN ready'
 ```
 
-rootless Docker、Docker Desktop 與非標準 socket path 沒有納入目前 production 契約。
+rootless Docker、Docker Desktop 與非標準 socket path 不在 production 契約內。
 
 ## 目錄配置
-
-建議 deployment 目錄：
 
 ```text
 ddns-openvpn-proxy/
 ├── .env
-├── docker-compose.yml
-├── scripts/
-│   └── ddns-openvpn.sh
-└── config/
-    ├── openvpn/
-    │   ├── client.ovpn
-    │   ├── ca.crt
-    │   ├── client.crt
-    │   └── client.key
-    └── wireguard/
-        └── wg0.conf
+├── docker-compose.yml                 # Gluetun backend（預設）
+├── docker-compose.openconnect.yml     # OpenConnect backend
+├── docker-compose.singbox.yml         # sing-box backend
+├── compose/core.yml                   # 共用 service（extends）
+├── scripts/                           # helper：ddns-vpn.sh + lib/ + adapters/
+├── docker/socket-proxy-haproxy.cfg.tmpl
+└── config/                            # 不進版控
+    ├── openvpn/      client.ovpn [+ ca.crt client.crt client.key]
+    ├── wireguard/    wg0.conf
+    ├── openconnect/  client.conf [+ ca.pem]
+    └── sing-box/     config.json [+ ca.crt]
 ```
 
-只有 `VPN_CONFIG_DIR` 選定的目錄會 read-only mount 到 `/source`。OpenVPN
-`client.ovpn` 引用的相對路徑都以該目錄為基準。
+只有 `VPN_CONFIG_DIR` 選定的目錄會 read-only mount 到 `/source`；profile 引用的相對
+路徑都以該目錄為基準。
+
+## 選擇 backend
+
+| 連線方式 | `.env` | 說明文件 |
+| --- | --- | --- |
+| OpenVPN | `VPN_TYPE=openvpn`（預設） | 本文件 |
+| WireGuard | `VPN_TYPE=wireguard` | 本文件 |
+| OpenConnect | `VPN_TYPE=openconnect` + `COMPOSE_FILE=docker-compose.openconnect.yml` | [backends/openconnect.md](backends/openconnect.md) |
+| sing-box | `VPN_TYPE=singbox` + `COMPOSE_FILE=docker-compose.singbox.yml` | [backends/singbox.md](backends/singbox.md) |
+
+`COMPOSE_FILE` 放在 `.env` 後，所有 `docker compose` 與 `make` 指令都會使用對應
+stack；`scripts/validate-compose.sh` 會在 `COMPOSE_FILE` 與 `VPN_TYPE` 不一致時
+拒絕。切換 backend 前先 `make down`（不同 backend 的 container 名稱不同，但共用
+`vpn-state` volume 與 host port）。
 
 ## 準備 profile
 
-### Inline certificate profile
+### OpenVPN
 
-如果 `.ovpn` 已包含 `<ca>`、`<cert>`、`<key>` block，只需一個檔案：
-
-```bash
-mkdir -p config/openvpn
-install -m 600 /path/provider.ovpn config/openvpn/client.ovpn
-```
-
-### External file profile
+Inline 憑證只需一個檔案；外部檔案放同一目錄，profile 可保留相對路徑：
 
 ```bash
 mkdir -p config/openvpn
 install -m 600 /path/provider.ovpn config/openvpn/client.ovpn
-install -m 600 /path/ca.crt config/openvpn/ca.crt
-install -m 600 /path/client.crt config/openvpn/client.crt
-install -m 600 /path/client.key config/openvpn/client.key
+install -m 600 /path/ca.crt config/openvpn/ca.crt      # profile 有引用時
 ```
-
-Profile 可保留相對路徑：
 
 ```ovpn
+remote vpn.example.com 1194 udp
 ca ca.crt
 cert client.crt
 key client.key
 ```
 
-### Username/password authentication
+若 profile 使用 `auth-user-pass`，在 `.env` 設定 `OPENVPN_USER`／`OPENVPN_PASSWORD`；
+Gluetun 會覆寫 directive 中的檔案路徑。只設定其中一個會被拒絕。
 
-若 provider profile 使用：
-
-```ovpn
-auth-user-pass
-```
-
-在 `.env` 設定：
-
-```dotenv
-OPENVPN_USER=vpn-username
-OPENVPN_PASSWORD=replace-with-the-vpn-password
-```
-
-Gluetun custom provider 會把 `auth-user-pass` 覆寫到 container 內部 auth file，因此
-不要依賴 directive 的 `credentials.txt` path。只設定 user 或 password 其中一個會被
-Compose validator 拒絕。
-
-### WireGuard profile
+### WireGuard
 
 ```bash
 mkdir -p config/wireguard
 install -m 600 /path/wg0.conf config/wireguard/wg0.conf
 ```
 
-Profile 必須有且只有一個 `[Interface]` 與一個 `[Peer]`，並包含 PrivateKey、Address、
-PublicKey 與 hostname-based Endpoint。可從
-[`examples/wireguard/wg0.conf`](../examples/wireguard/wg0.conf) 複製結構，但務必替換所有
-key placeholder。
+必須有且只有一個 `[Interface]`（PrivateKey、Address）與一個 `[Peer]`（PublicKey、
+hostname-based Endpoint）。`AllowedIPs`、keepalive、MTU、implementation 由 `.env`
+的 `WIREGUARD_*` 控制，Gluetun 不從檔案匯入。
 
-Gluetun 只從 config secret file 匯入 key、address 與 endpoint。WireGuard routing、
-keepalive、MTU、implementation 請在 `.env` 設定，不要假設 wg-quick profile 中同名欄位
-會覆寫 Gluetun environment。
+### OpenConnect 與 sing-box
 
-不要把 `config/`、`.env` 或 credentials 加入 git。專案 `.gitignore` 已忽略常見路徑，
-但部署端仍應設定正確的檔案權限與備份政策。
+見各自的 backend 文件；範例在 `examples/openconnect/client.conf` 與
+`examples/sing-box/config.json`。
+
+不要把 `config/`、`.env` 或 credentials 加入 git（`.gitignore` 已忽略）。
 
 ## 環境變數
-
-先建立 `.env`：
 
 ```bash
 cp .env.example .env
 chmod 600 .env
 ```
 
-### 一般與 VPN
+完整定義與驗證規則在 [spec §4](spec.md)。以下依用途分組。
+
+### 選擇與 profile
 
 | 變數 | 預設 | 說明 |
 | --- | --- | --- |
-| `TZ` | `Asia/Taipei` in example | log timezone；helper timestamp 固定 UTC |
-| `COMPOSE_PROJECT_NAME` | `ddns-openvpn-proxy` | Compose resource prefix |
-| `VPN_TYPE` | `openvpn` | `openvpn` 或 `wireguard` |
+| `VPN_TYPE` | `openvpn` | `openvpn`、`wireguard`、`openconnect`、`singbox` |
+| `COMPOSE_FILE` | 未設定（=`docker-compose.yml`） | 非預設 backend 的 stack file |
 | `VPN_CONFIG_DIR` | `./config/openvpn` | host 上的 source 目錄 |
 | `VPN_CONFIG_FILE` | `client.ovpn` | source 目錄內的 profile 檔名 |
-| `OPENVPN_USER` | 空 | profile 有 `auth-user-pass` 時必填 |
-| `OPENVPN_PASSWORD` | 空 | 必須與 `OPENVPN_USER` 成對 |
-| `DDNS_HOSTNAME` | 空 | 空白時從 OpenVPN `remote` 或 WireGuard `Endpoint` 讀取 |
-| `OPENVPN_VERBOSITY` | `1` | Gluetun OpenVPN verbosity，範圍依上游 |
+| `DDNS_HOSTNAME` | 空 | 空白時使用 profile 的 endpoint host（OpenConnect：`OPENCONNECT_SERVER`） |
 
-舊版 `.env` 的 `OPENVPN_CONFIG_DIR`／`OPENVPN_CONFIG_FILE` 仍是 OpenVPN fallback alias；
-新部署應使用通用的 `VPN_CONFIG_*`。`DDNS_HOSTNAME` 適合 profile endpoint 暫時仍是舊
-值、但實際要監看的 hostname 不同時使用。Renderer 不論 source 原值為何，都會改寫
-唯一 endpoint host。
+`DDNS_HOSTNAME` 適合 profile endpoint 暫時仍是舊值、但實際要監看的 hostname 不同
+時使用；renderer 不論 source 原值為何都改寫唯一 endpoint（sing-box 除外：值必須
+出現在 profile 內）。
 
-### WireGuard runtime
+### Backend 專屬
 
-| 變數 | 預設 | 說明 |
+| 變數 | 預設 | 適用 |
 | --- | --- | --- |
-| `WIREGUARD_ALLOWED_IPS` | `0.0.0.0/0` | Gluetun tunnel routes；不從 wg0.conf 匯入 |
-| `WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL` | `0` | Go duration，例如 `25s` |
-| `WIREGUARD_MTU` | `1320` | validator 接受 `576..65535` |
-| `WIREGUARD_IMPLEMENTATION` | `auto` | `auto`、`userspace` 或 `kernelspace` |
+| `OPENVPN_USER` / `OPENVPN_PASSWORD` / `OPENVPN_VERBOSITY` | 空 / 空 / `1` | Gluetun OpenVPN |
+| `WIREGUARD_ALLOWED_IPS` | `0.0.0.0/0` | Gluetun WireGuard |
+| `WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL` | `0`（Go duration，如 `25s`） | Gluetun WireGuard |
+| `WIREGUARD_MTU` | `1320`（576..65535） | Gluetun WireGuard |
+| `WIREGUARD_IMPLEMENTATION` | `auto`（`userspace`、`kernelspace`） | Gluetun WireGuard |
+| `OPENCONNECT_SERVER` / `OPENCONNECT_PORT` | 空（必填） / `443` | OpenConnect |
+| `OPENCONNECT_USER` / `OPENCONNECT_PASSWORD` | 空 | OpenConnect（成對） |
+| `OPENCONNECT_TOTP_SECRET` / `OPENCONNECT_OPTIONS` / `OPENCONNECT_RECONNECT_DELAY` | 空 / 空 / `30` | OpenConnect |
+| `SINGBOX_DNS_SERVER` / `SINGBOX_LOG_LEVEL` | `1.1.1.1` / `info` | sing-box |
+| `SINGBOX_HEALTH_URL` / `SINGBOX_HEALTH_PROBE` | Cloudflare 204 / Clash API URL | sing-box |
 
 ### Polling 與 restart
 
 | 變數 | 預設 | 驗證 |
 | --- | --- | --- |
-| `DDNS_POLL_SECONDS` | `60` | integer，最少 `10` |
-| `DDNS_INIT_RETRY_SECONDS` | `5` | positive integer |
+| `DDNS_POLL_SECONDS` | `60` | 整數，最少 `10` |
+| `DDNS_INIT_RETRY_SECONDS` | `5` | 正整數 |
 | `DDNS_RESOLVER` | 空 | 指定時必須是 IPv4 DNS server |
-| `GLUETUN_CONTAINER_NAME` | `ddns-openvpn-proxy` | watcher restart target |
-| `VPROXY_CONTAINER_NAME` | `ddns-openvpn-vproxy` | watcher 的第二個 restart target |
-| `GLUETUN_RESTART_TIMEOUT_SECONDS` | `20` | positive integer |
-| `GLUETUN_HEALTH_TIMEOUT_SECONDS` | `120` | restart 後等待 Gluetun healthy 的上限 |
+| `VPN_CONTAINER_NAME` | 依 stack（`ddns-openvpn-proxy`、`ddns-openconnect-proxy`、`ddns-singbox-proxy`） | restart target |
+| `VPROXY_CONTAINER_NAME` | `ddns-openvpn-vproxy` | Gluetun stack 的 sidecar target |
+| `VPN_RESTART_TIMEOUT_SECONDS` | `20` | 正整數 |
+| `VPN_HEALTH_TIMEOUT_SECONDS` | `120` | 每個就緒探測的等待上限 |
 
-`DDNS_OVERRIDE_IPS` 只供測試與診斷。production 必須留空；可接受以逗號或 whitespace
-分隔的 IPv4 列表。
+`DDNS_OVERRIDE_IPS` 只供測試與診斷，production 必須留空。舊名 `GLUETUN_CONTAINER_NAME`、
+`GLUETUN_RESTART_TIMEOUT_SECONDS`、`GLUETUN_HEALTH_TIMEOUT_SECONDS`、
+`OPENVPN_CONFIG_DIR`、`OPENVPN_CONFIG_FILE` 仍是 alias。
 
 ### Proxy
 
 | 變數 | 預設 | 說明 |
 | --- | --- | --- |
-| `PROXY_BIND_ADDRESS` | `127.0.0.1` | host bind address |
-| `HTTP_PROXY_PORT` | `8888` | host HTTP proxy TCP port |
-| `SOCKS5_PROXY_PORT` | `1080` | host SOCKS5 TCP port |
-| `HTTPPROXY` | `on` | Gluetun HTTP proxy switch |
-| `HTTPPROXY_USER` | 空 | HTTP authentication user |
-| `HTTPPROXY_PASSWORD` | 空 | HTTP authentication password |
-| `HTTPPROXY_STEALTH` | `off` | Gluetun proxy stealth mode |
-| `SOCKS5_USER` | 空 | SOCKS5 authentication user |
-| `SOCKS5_PASSWORD` | 空 | SOCKS5 authentication password |
+| `PROXY_BIND_ADDRESS` | `127.0.0.1` | host bind address；OpenConnect backend 只能是這個值 |
+| `HTTP_PROXY_PORT` / `SOCKS5_PROXY_PORT` | `8888` / `1080` | host port |
+| `HTTPPROXY` | `on` | HTTP proxy 開關（Gluetun、sing-box） |
+| `HTTPPROXY_USER` / `HTTPPROXY_PASSWORD` | 空 | 成對 |
+| `HTTPPROXY_STEALTH` | `off` | Gluetun 專用 |
+| `SOCKS5_USER` / `SOCKS5_PASSWORD` | 空 | 成對 |
 | `VPROXY_LOG` | `info` | vproxy log level |
 
-### Log rotation
+非 loopback bind 時，SOCKS5 與（開啟的）HTTP 都必須有完整認證。
 
-| 變數 | 預設 | 說明 |
-| --- | --- | --- |
-| `LOG_MAX_SIZE` | `10m` | 每個 Docker json log file 上限 |
-| `LOG_MAX_FILE` | `3` | 每個 service 保留檔案數 |
+### Log rotation 與 images
 
-所有 services 共用同一個 rotation policy，避免長期 DNS／VPN warning 填滿 host disk。
-
-Authentication pair 必須「兩個都有」或「兩個都空」。非 loopback bind 時，Compose
-validator 進一步要求 HTTP（若開啟）與 SOCKS5 都有 credentials。
-
-### Images
-
-| 變數 | 預設 |
-| --- | --- |
-| `GLUETUN_IMAGE` | `qmcgaw/gluetun:v3.41.1` |
-| `DDNS_HELPER_IMAGE` | `docker:29.6.1-cli-alpine3.24` |
-| `VPROXY_IMAGE` | `ghcr.io/0x676e67/vproxy:v2.5.5` |
-| `SOCKET_PROXY_IMAGE` | `ghcr.io/tecnativa/docker-socket-proxy:v0.4.2` |
-
-Validator 會拒絕 `latest`、`edge`、`master`、`main` moving tag。需要更強的 reproducibility
-時，可將值改成 `image@sha256:...` digest。
+`LOG_MAX_SIZE`（`10m`）、`LOG_MAX_FILE`（`3`）套用到所有 service。Image pin：
+`DDNS_HELPER_IMAGE`、`SOCKET_PROXY_IMAGE`、`GLUETUN_IMAGE`、`VPROXY_IMAGE`、
+`OPENCONNECT_IMAGE`、`SINGBOX_IMAGE`；validator 拒絕 `latest`、`edge`、`master`、
+`main`。需要更強的 reproducibility 時可改成 `image@sha256:...`。
 
 ## 部署
 
-### 建議流程
-
 ```bash
-make validate
-make up
+make validate   # rendered Compose 契約 + 真實 helper container 驗證 profile
+make up         # pull 並等待 long-running services healthy
 ```
 
-`make validate` 會：
-
-1. render 完整 Compose model 並驗證權限、安全與 service 契約；
-2. 用真正的 stock helper container 驗證 mounted profile。
-
-`make up` 接著 pull images，然後等待 long-running services healthy。
-
-### 純 Compose 流程
+純 Compose：
 
 ```bash
 docker compose pull
 docker compose up -d --wait --wait-timeout 180
 ```
 
-不需要 Make、不需要 compiler、不需要 Docker Buildx，也不需要登入本專案自己的
-container registry。
-
-### 驗證零 build
+確認零 build：
 
 ```bash
-docker compose config --format json | jq '.services[] | .build?'
-# 每行都應為 null，或沒有輸出
-
-find . -name Dockerfile -print
-# 應沒有輸出
+docker compose config --format json | jq '.services[] | .build?'   # 全為 null
+find . -name Dockerfile -print                                      # 無輸出
 ```
 
 ## 日常觀察
-
-### Service status
 
 ```bash
 docker compose ps --all
 ```
 
-正常狀態：
-
 | Service | 預期狀態 |
 | --- | --- |
-| `ddns-init` | `Exited (0)`；one-shot 成功是正常狀態 |
-| `gluetun` | `Up ... (healthy)` |
-| `vproxy` | `Up ... (healthy)` |
+| `ddns-init` | `Exited (0)` |
+| VPN container（`gluetun`／`openconnect`／`singbox`） | `Up ... (healthy)` |
+| `vproxy`（Gluetun stack） | `Up ... (healthy)` |
 | `docker-socket-proxy` | `Up ... (healthy)` |
 | `ddns-watcher` | `Up ... (healthy)` |
 
-### Logs
-
 ```bash
-make logs
+make logs                         # 所有 service
+docker compose logs -f ddns-watcher
 ```
 
-或：
-
-```bash
-docker compose logs -f --tail=100 \
-  gluetun vproxy ddns-watcher docker-socket-proxy
-```
-
-helper 使用可搜尋的 key-value 訊息：
+Helper log 為可搜尋的 key-value：
 
 ```text
-2026-07-15T01:23:45Z level=INFO rendered profile vpn_type=wireguard hostname=vpn.example.com ip=203.0.113.10 output=/state/runtime/vpn.conf
-2026-07-15T02:34:56Z level=WARN DNS lookup failed hostname=vpn.example.com; keeping current tunnel
-2026-07-15T03:45:12Z level=INFO restarted VPN stack vpn_type=wireguard reason=address-change hostname=vpn.example.com old_ip=203.0.113.10 new_ip=203.0.113.20 gluetun=ddns-openvpn-proxy vproxy=ddns-openvpn-vproxy
+2026-09-28T01:23:45Z level=INFO rendered profile vpn_type=openconnect hostname=vpn.example.com ip=203.0.113.10 output=/state/runtime/vpn.conf
+2026-09-28T02:34:56Z level=WARN DNS lookup failed hostname=vpn.example.com; keeping current tunnel
+2026-09-28T03:45:12Z level=INFO restarted VPN stack vpn_type=openconnect reason=address-change hostname=vpn.example.com old_ip=203.0.113.10 new_ip=203.0.113.20 vpn=ddns-openconnect-proxy sidecar=none
 ```
 
-IP 與 profile 都不變時不寫 INFO，避免每分鐘製造無價值 log；heartbeat 仍會更新。
-
-### 檢視 runtime state
+檢視 runtime state：
 
 ```bash
 docker compose run --rm --no-deps --entrypoint sh ddns-init -c '
@@ -288,238 +224,136 @@ docker compose run --rm --no-deps --entrypoint sh ddns-init -c '
 '
 ```
 
-runtime profile 可能含 inline OpenVPN certificate/key 或 WireGuard PrivateKey，不要貼到
-公開 issue。
+runtime profile 可能含金鑰，不要貼到公開 issue。
 
 ## Proxy 驗證
 
-### Loopback
-
 ```bash
-curl --fail --show-error \
-  -x http://127.0.0.1:8888 https://ifconfig.me
-
-curl --fail --show-error \
-  --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
+curl --fail -x http://127.0.0.1:8888 https://ifconfig.me
+curl --fail --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
+# 有認證時
+curl --fail -x http://HOST:8888 -U 'USER:PASSWORD' https://ifconfig.me
+curl --fail --socks5-hostname HOST:1080 -U 'USER:PASSWORD' https://ifconfig.me
 ```
 
-### Authentication
-
-```bash
-curl --fail --show-error \
-  -x http://HOST:8888 -U 'USER:PASSWORD' https://ifconfig.me
-
-curl --fail --show-error \
-  --socks5-hostname HOST:1080 -U 'USER:PASSWORD' https://ifconfig.me
-```
-
-務必再測一次錯誤 password，預期 request 被拒絕。兩個 proxy 的正確請求都應顯示
-相同 VPN 出口 IP。
+務必再測一次錯誤 password，預期被拒絕。使用 `--socks5-hostname` 讓目的 hostname
+在 proxy 端解析。
 
 ## LAN／Internet exposure
 
-安全順序：
-
-1. 先填入 HTTP 與 SOCKS5 兩組完整 credentials；
-2. 將 `PROXY_BIND_ADDRESS` 設為特定 LAN address，只有必要時才用 `0.0.0.0`；
+1. 填入 HTTP 與 SOCKS5 兩組完整 credentials（OpenConnect backend 不支援，保持
+   loopback）；
+2. `PROXY_BIND_ADDRESS` 設為特定 LAN address，只有必要時才 `0.0.0.0`；
 3. `make validate-compose`；
 4. host firewall 只允許可信 source CIDR；
 5. 啟動後測試匿名與錯誤 credentials 確實被拒絕。
-
-範例 UFW 規則：
 
 ```bash
 sudo ufw allow from 192.168.50.0/24 to any port 8888 proto tcp
 sudo ufw allow from 192.168.50.0/24 to any port 1080 proto tcp
 ```
 
-不要只依賴 proxy password 直接暴露到公開 Internet。HTTP Basic 與 SOCKS5 username/
-password 都不是 transport encryption；若需跨不可信網路，應在外層使用 VPN、SSH
-tunnel 或其他加密 transport。
+HTTP Basic 與 SOCKS5 認證都不是 transport encryption；跨不可信網路請外加 VPN 或
+SSH tunnel。
 
 ## 設定與憑證輪替
 
-source 目錄是 bind mount。替換 `.ovpn`、WireGuard `.conf`、certificate 或 key 後，
-不必手動 restart；watcher 最晚在一個 polling interval 內偵測 fingerprint 改變並
-重啟 Gluetun 與 vproxy。環境變數 credentials／WireGuard runtime settings 改變則需
-recreate，因為 container environment 不會熱更新。
-
-建議使用同 filesystem 的 atomic replace：
+替換 profile、憑證或金鑰後不必手動 restart；watcher 最晚一個 polling interval 內
+偵測 fingerprint 改變並執行 restart chain。建議同 filesystem 的 atomic replace：
 
 ```bash
 install -m 600 /path/new-client.crt config/openvpn/client.crt.new
 mv config/openvpn/client.crt.new config/openvpn/client.crt
 ```
 
-修改後觀察：
-
-```bash
-docker compose logs -f ddns-watcher gluetun
-```
+`.env` 的改變（credentials、`OPENCONNECT_SERVER`、`WIREGUARD_*` 等）需要
+`docker compose up -d --force-recreate`，container environment 不會熱更新。
 
 ## 強制重新解析與重連
 
-一般情況不需要。診斷時可執行：
-
 ```bash
 docker compose run --rm --no-deps ddns-init init
-docker compose restart gluetun
-until [ "$(docker inspect -f '{{.State.Health.Status}}' \
-  "$(docker compose ps -q gluetun)")" = healthy ]; do sleep 2; done
+docker compose restart <vpn-service>        # gluetun / openconnect / singbox
+# Gluetun stack 另外：
+until [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q gluetun)")" = healthy ]; do sleep 2; done
 docker compose restart vproxy
 ```
 
-第一行重新 render 並提交 state；後三行依 production lifecycle 讓 Gluetun 立即讀取，
-等 healthy 後再重啟 vproxy。這會造成短暫中斷。
+## 升級與 rollback
 
-## 升級
+1. 在 branch 或 staging 更新 `.env` 的 image tag；閱讀上游 release notes。
+2. `make check`。
+3. `docker compose pull && docker compose up -d --force-recreate --wait --wait-timeout 180`。
 
-1. 在 branch 或 staging 更新 `.env` 的 version tag。
-2. 閱讀四個上游 release notes。
-3. 執行 `make check`。
-4. 在 target host pull 並 recreate。
-
-```bash
-make check
-docker compose pull
-docker compose up -d --force-recreate --wait --wait-timeout 180
-```
-
-不要使用 `docker compose up --build`；repository 沒有 build context。
-
-### Rollback
-
-把 `.env` image tag 改回已知正常版本：
-
-```bash
-docker compose pull
-docker compose up -d --force-recreate --wait --wait-timeout 180
-```
-
-`vpn-state` 與 source profile 向後相容，rollback 不需要資料 migration。
+Rollback 把 tag 改回已知正常版本後重做第 3 步；`vpn-state` 與 source profile
+向後相容，不需要 migration。不要使用 `docker compose up --build`。
 
 ## Host reboot
 
-long-running services 使用 `restart: unless-stopped`，Docker daemon 重啟後會自動恢復。
-`vpn-state` 保留最後 profile；watcher 啟動後會再次解析 DNS 和 fingerprint。如果 host
-停機期間 DDNS 已改變，最多一個 polling interval 內會 render 並重啟 Gluetun。
-watcher 會等 Gluetun healthy 後同步重啟 vproxy。
+long-running services 使用 `restart: unless-stopped`。`vpn-state` 保留最後
+profile；watcher 啟動後重新解析 DNS 與 fingerprint。停機期間 DDNS 已改變時，最多
+一個 polling interval 內 render 並執行 restart chain。
 
 ## 停止與移除
 
-保留 runtime state：
-
 ```bash
-make down
+make down    # 保留 runtime state
+make clean   # 連 vpn-state volume 一起刪除
 ```
 
-連衍生 state volume 一起刪除：
-
-```bash
-make clean
-```
-
-source `config/openvpn`／`config/wireguard` 不會被刪除。
+`config/` 不會被刪除。
 
 ## 故障排除
 
-### `ddns-init` 是 Exited
-
-先看 exit code：
+### `ddns-init` 非 0 結束
 
 ```bash
-docker compose ps --all ddns-init
 docker compose logs ddns-init
 ```
 
-`Exited (0)` 正常；非 0 才是失敗。
+`level=ERROR` 訊息就是原因。常見：
 
-### 找不到 profile
-
-```text
-level=ERROR OpenVPN profile not found: /source/client.ovpn
-# 或
-level=ERROR WireGuard profile not found: /source/wg0.conf
-```
-
-確認 `.env` 的 host directory 與 filename：
-
-```bash
-ls -la "$(awk -F= '$1 == "VPN_CONFIG_DIR" { print $2 }' .env)"
-docker compose config | grep -A5 '/source'
-```
-
-也確認 `VPN_TYPE`、`VPN_CONFIG_DIR`、`VPN_CONFIG_FILE` 三者屬於同一協定。
-
-### 多個 remote 被拒絕
-
-```text
-expected exactly one active remote directive ... found 2
-```
-
-Gluetun custom profile 只採用第一個 remote。本專案 fail-fast，不假裝額外 remote 有
-failover。建立一份只保留目標 DDNS hostname 的 deployment profile。
-
-### Relative reference 不存在
-
-```text
-ca references an unreadable file: /source/ca.crt
-```
-
-將檔案放進 `VPN_CONFIG_DIR`，修正 profile 路徑與大小寫。container 不會看到該
-目錄以外的 host file。
-
-### WireGuard profile 被拒絕
-
-常見原因是多個 `[Peer]`、缺少 PrivateKey／Address／PublicKey／Endpoint，或 Endpoint
-不是 `hostname:1..65535`。先執行：
-
-```bash
-docker compose run --rm --no-deps ddns-init validate
-```
-
-若 Gluetun 回報 key、address 或 route 無效，再確認 provider key 是合法 WireGuard
-base64 key，並檢查 `.env` 的 `WIREGUARD_ALLOWED_IPS` 與 MTU。
+| 訊息 | 處理 |
+| --- | --- |
+| `... profile not found: /source/...` | 確認 `VPN_CONFIG_DIR`／`VPN_CONFIG_FILE`；`docker compose config \| grep -A5 /source` |
+| `VPN_TYPE=... belongs to the X backend, but this stack is VPN_BACKEND=Y` | `COMPOSE_FILE` 與 `VPN_TYPE` 不一致 |
+| `expected exactly one active remote directive` | 只保留目標 DDNS hostname 的 remote |
+| `... references an unreadable file` | 把檔案放進 `VPN_CONFIG_DIR`，修正路徑與大小寫 |
+| `invalid WireGuard profile` | 多個 Peer、缺少 PrivateKey／Address／PublicKey／Endpoint、port 不合法 |
+| `OPENCONNECT_SERVER must be set` | 在 `.env` 設定 gateway hostname |
+| `OpenConnect profile must not set '...'` | 移除 stack 管理的選項（見 backend 文件） |
+| `sing-box profile must contain an outbound tagged "vpn"` | 把主要 outbound 的 `tag` 改為 `vpn` |
+| `sing-box profile has several hostname-based "server" values` | 設定 `DDNS_HOSTNAME` |
+| `... credentials are required when PROXY_BIND_ADDRESS is not 127.0.0.1` | 補齊認證或改回 loopback |
+| `the openconnect backend has no proxy authentication` | OpenConnect 只能 loopback |
 
 ### Init 一直重試 DNS
 
 ```bash
 docker compose logs -f ddns-init
-```
-
-確認 hostname：
-
-```bash
 docker compose run --rm --no-deps ddns-init validate
 ```
 
-如需指定 resolver，在 `.env` 設定 IPv4：
-
-```dotenv
-DDNS_RESOLVER=1.1.1.1
-```
-
-接著 recreate init／stack。不要把 `DDNS_OVERRIDE_IPS` 當成 production 解法；它會
-完全繞過 DNS。
+必要時在 `.env` 指定 `DDNS_RESOLVER=1.1.1.1` 後 recreate。不要把
+`DDNS_OVERRIDE_IPS` 當 production 解法。
 
 ### Watcher 偶爾記錄 DNS warning
 
-單次 warning 不會中斷 tunnel，通常不需人工處理。若長期持續：
+單次 warning 不會中斷 tunnel。長期持續時檢查 host／Docker DNS、指定 resolver 的
+UDP／TCP 53、DDNS record 是否仍有 A record，以及 VPN container health 是否同時惡化。
 
-- 檢查 host／Docker DNS；
-- 檢查指定 resolver 的 UDP/TCP 53 是否可達；
-- 確認 DDNS record 仍有 IPv4 A record；
-- 觀察 Gluetun health 是否同時惡化。
-
-### Gluetun 不健康
+### VPN container 不健康
 
 ```bash
-docker compose logs --tail=200 gluetun
-docker inspect --format '{{json .State.Health}}' ddns-openvpn-proxy | jq
+docker compose logs --tail=200 <vpn-service>
+docker inspect --format '{{json .State.Health}}' <container-name> | jq
 ```
 
-常見原因：錯誤 OpenVPN 憑證／WireGuard key、provider server 不可達、cipher／route
-不相容、host firewall、TUN device，或 DDNS 新 IP 尚未提供所選 VPN service。
+| Backend | 常見原因 |
+| --- | --- |
+| gluetun | 錯誤憑證／key、server 不可達、cipher／route 不相容、TUN device、DDNS 新 IP 尚未提供服務 |
+| openconnect | 認證失敗、`servercert` pin 不符、需要互動式 MFA、gateway 不接受 protocol；tunnel 未建立時 proxy port 會回 RST |
+| singbox | `sing-box check` 失敗（看 log 第一行）、TLS `server_name` 未設定導致對 IP 驗證失敗、server 拒絕、`SINGBOX_HEALTH_URL` 不可達 |
 
 ### Watcher 無法 restart
 
@@ -528,47 +362,28 @@ docker compose ps docker-socket-proxy ddns-watcher
 docker compose logs docker-socket-proxy ddns-watcher
 ```
 
-檢查：
+檢查 `/var/run/docker.sock` 可用、socket proxy healthy、`VPN_CONTAINER_NAME`
+（與 `VPROXY_CONTAINER_NAME`）與實際 `container_name` 相同、`ddns-watcher` 同時在
+default 與 `docker-api` network、SELinux／AppArmor 是否阻擋。socket proxy log 中
+`invalid restart target name` 或 `duplicate restart target name` 表示 `.env` 的
+container 名稱不合法。
 
-- `/var/run/docker.sock` 存在且 Docker daemon 可用；
-- socket proxy healthy；
-- `GLUETUN_CONTAINER_NAME`／`VPROXY_CONTAINER_NAME` 與兩個 `container_name` 相同；
-- `ddns-watcher` 同時加入 default 與 `docker-api` networks；
-- SELinux/AppArmor 是否阻擋 socket proxy。
+### SOCKS5 container restarting（Gluetun stack）
 
-### SOCKS5 container restarting
-
-```bash
-docker compose logs vproxy
-```
-
-最常見是只設定了 `SOCKS5_USER` 或 `SOCKS5_PASSWORD` 其中一個。補齊兩者，或兩者
-都清空，再 recreate。
+最常見是只設定了 `SOCKS5_USER` 或 `SOCKS5_PASSWORD` 其中一個。
 
 ### Port 可連線但沒有流量
 
-新版 vproxy healthcheck 已同時檢查 Gluetun health、VPN interface 與 route。若 port 可連線
-但請求仍失敗，先看兩個 container 的健康與 log：
-
-```bash
-docker compose ps gluetun vproxy
-docker compose logs --tail=200 gluetun
-```
-
-也確認 Gluetun environment 保留 `FIREWALL_INPUT_PORTS: "1080,9999"`；否則 SOCKS5
-sidecar listener 或 watcher health probe 會被 Gluetun firewall 阻擋。
+先看 VPN container 與 sidecar 的 health 與 log。Gluetun stack 確認
+`FIREWALL_INPUT_PORTS: "1080,9999"` 未被移除；sing-box 確認 `route.final` 沒有被
+profile 的 `route` 覆蓋（stack 的值應優先，log 會有 WARN）。
 
 ### Port 已被使用
-
-```text
-Bind for 127.0.0.1:8888 failed: port is already allocated
-```
-
-修改 host-side port：
 
 ```dotenv
 HTTP_PROXY_PORT=18888
 SOCKS5_PROXY_PORT=11080
 ```
 
-container 內仍固定使用 `8888` 與 `1080`。
+container 內的 port 固定（Gluetun `8888`／`1080`、OpenConnect `8888`／`8889`、
+sing-box `8888`／`1080`）。

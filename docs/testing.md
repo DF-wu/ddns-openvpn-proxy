@@ -6,240 +6,156 @@
 make check
 ```
 
-需要 Docker daemon、Docker Compose、`jq` 與網路連線。第一次執行會 pull 版本固定的
-helper、socket proxy、ShellCheck test image（若另行執行 static check）及小型 Alpine
-fixture image；不會 build 任何 image。
+需要 Docker daemon、Docker Compose、`jq`、`curl` 與網路連線。依序執行：
 
-`make check` 依序執行：
+1. Markdown lint（`README.md`、`CHANGELOG.md`、`docs/**`）；
+2. rendered Compose 契約驗證（`scripts/validate-compose.sh`，依 `.env` 或
+   `.env.example` 選定的 backend）；
+3. 離線測試（`tests/run.sh`）：helper 行為、Compose 契約負面案例、frozen
+   compatibility watcher；
+4. 真實 container 契約（`tests/container-contract.sh`）：三個 backend。
 
-1. Markdown 文件 lint；
-2. rendered Compose contract validation；
-3. POSIX shell DDNS behavior tests；
-4. 真實 stock helper 與 restart-only Docker API container contract test。
+`make shellcheck` 另外以 pinned ShellCheck image 檢查所有 shell script（CI 使用原生
+ShellCheck）。
 
-## Compose contract validation
-
-```bash
-make validate-compose
-```
-
-`scripts/validate-compose.sh` 使用 `docker compose config --format json` 檢查實際 render
-後的 model，不只檢查 YAML syntax。
-
-### Service 與 image invariant
-
-- service set 固定為 `ddns-init`、`gluetun`、`vproxy`、`docker-socket-proxy`、
-  `ddns-watcher`；
-- 任一 service 都不得有 `build`；
-- init 與 watcher 必須使用相同 stock helper image；
-- 不得重新出現 project-specific watcher image；
-- image 不得使用 `latest`、`edge`、`master`、`main` moving tag；
-- repository 不得存在 Dockerfile。
-
-### Lifecycle 與 network invariant
-
-- Gluetun 必須等待 init `service_completed_successfully`；
-- init、watcher 與 Gluetun 必須使用相同的 `VPN_TYPE` 與 runtime profile path；
-- vproxy 必須使用 `network_mode: service:gluetun`；
-- Gluetun firewall 必須允許 internal `1080/tcp` 與 `9999/tcp`；
-- vproxy healthcheck 必須驗證 Gluetun health、VPN interface 與 VPN route；
-- watcher 必須等初始 vproxy healthy，且兩個 restart target 必須與 Compose 名稱相同；
-- watcher 必須透過 `tcp://docker-socket-proxy:2375`；
-- `docker-api` network 必須是 internal。
-
-### Security invariant
-
-- 只有 socket proxy 可以掛 `/var/run/docker.sock`；
-- socket proxy 必須載入唯讀的精確 HAProxy policy，不得依賴上游 coarse-grained
-  `CONTAINERS`／`ALLOW_RESTARTS` flags；
-- 所有非 Gluetun service 必須 `cap_drop: [ALL]`；
-- WireGuard PrivateKey／PresharedKey 不得出現在 Compose environment；
-- 所有 service 必須 `no-new-privileges:true`；
-- HTTP／SOCKS5 credentials 不可只設定一半；
-- 非 loopback bind 時，所有已啟用的 proxy 都必須有完整 authentication。
-
-如果 repository 有 `.env`，validator 會驗證該檔；否則驗證 `.env.example` 的安全預設。
-
-## DDNS behavior tests
+## Helper 行為測試
 
 ```bash
-make test
+sh tests/helper.sh
 ```
 
-`tests/run.sh` 是不需要 VPN server 或 Docker daemon 的 POSIX shell TAP-style suite。
+POSIX sh TAP-style suite，不需要 VPN server 或 Docker daemon；`docker`、`getent`、
+`nslookup`、`wget`、`nc` 以記錄參數的 fake 取代，因此可精確斷言 restart 順序與
+state commit 時機。48 個案例涵蓋：
 
-| Case | 證明內容 |
+| 群組 | 證明內容 |
 | --- | --- |
-| Valid profile | 正確的 single-remote profile 可通過 preflight |
-| Renderer | hostname 轉 IPv4；relative reference 轉 absolute path |
-| Multi-A init | DNS addresses 去重排序並 deterministic 選擇 |
-| Resolver adapters | `getent` 與指定 `nslookup` output 都正確擷取 A record |
-| Round-robin reorder | answer order 變化不會 restart |
-| DNS failure | invalid/empty answer 保留 profile inode、last IP、hash，不 restart |
-| Address change | atomic render、Gluetun → healthy → vproxy、commit new state |
-| Referenced file change | 相同 IP 下 certificate fingerprint 仍觸發 full-stack restart |
-| Restart/health failure | 不提交 new IP/hash，讓下一輪完整 retry |
-| Namespace readiness | 新 Gluetun namespace 沒有 vproxy listener 時不 commit |
-| Multiple remotes | fail-fast，避免假 failover |
-| Missing reference | 啟動前拒絕缺少的 certificate/key |
-| Invalid override | 診斷用 IP 也必須是合法 IPv4 |
-| OpenVPN auth pair | `auth-user-pass` 必須有完整 Gluetun credentials |
-| Direct Compose proxy gate | helper 本身拒絕 partial／public unauthenticated proxy |
-| WireGuard validation | single interface／peer 與 required fields 才能通過 |
-| WireGuard renderer | 只替換 Endpoint hostname，保留 key 與 port |
-| WireGuard init/change | deterministic init、address change 與 profile change 都正確 restart |
-| WireGuard invalid profiles | multi-peer、missing key、invalid port 都 fail-fast |
-| WireGuard DNS failure | 保留現有 runtime profile，不 restart |
+| 通用 | multi-A 去重排序與 deterministic 選擇；resolver adapter（getent、指定 nslookup）；round-robin 重排不 restart；DNS 失敗保留 profile inode、last-ip、fingerprint 且不 restart；address-change 原子 render → VPN restart → 就緒探測 → sidecar → commit；profile-change 在相同 IP 下 restart；restart／就緒／sidecar 任一失敗不 commit；未知 `VPN_TYPE`、backend 與 stack 不符、gluetun 缺 sidecar 都 fail-fast；deprecated `ddns-openvpn.sh` 與 `GLUETUN_*`／`OPENVPN_*` alias 仍可用 |
+| OpenVPN | single-remote 通過；render 改 IP 與絕對路徑、mode 0600；multi-remote、缺引用檔、`auth-user-pass` 缺 credentials、partial／public proxy 都拒絕 |
+| WireGuard | single interface／peer 通過；只換 Endpoint host；multi-peer、缺 PrivateKey、port 不合法拒絕；DNS 失敗保留 tunnel |
+| OpenConnect | 通過；render 附加 `resolve=`／`non-inter`、`cafile` 絕對路徑、`vpn.env`；address-change 只 restart VPN container 並以 `tcp://openconnect:8888` 探測；CA 輪替 restart；缺 `OPENCONNECT_SERVER`、IPv4 server、port 不合法、stack 管理選項、未知 protocol、缺 cafile、partial credentials、非 loopback bind 都拒絕 |
+| sing-box | 通過；只改寫 `"server"`（含 minified JSON）、`certificate_path` 絕對路徑；address-change 以 Clash API 探測；憑證輪替 restart；含 `inbounds`、缺 `vpn` tag、多個 hostname server 未指定 `DDNS_HOSTNAME`、`DDNS_HOSTNAME` 不在 profile 都拒絕；DNS 失敗保留；public bind 認證政策 |
 
-測試用 fake `docker` 只記錄參數，因此可準確斷言 state commit ordering，而不會改動
-開發機上的 container。
+## Compose 契約
 
-`tests/compose-validation.sh` 另外驗證安全設定的 negative cases：public bind 無
-credentials、三組 partial credential pair、moving image tag、未知 VPN type、錯誤
-WireGuard MTU／implementation 都必須失敗；完整 authenticated public bind 與
-WireGuard mode 必須成功。
+```bash
+make validate-compose            # 目前 .env（或 .env.example）
+sh tests/compose-validation.sh   # 22 個跨 backend 案例
+```
 
-## 真實 container contract
+`scripts/validate-compose.sh` 用 `docker compose config --format json` 檢查
+rendered model 而非 YAML 文字。通用 invariant（所有 stack）：
+
+- 無 `build`、無 Dockerfile、無 moving tag、無自建 watcher image；
+- service 集合恰好等於該 backend 的預期；helper 兩個 service 使用同一 image、
+  同一 `/opt/ddns` script 目錄、同一 `/source` read-only mount、同一
+  `VPN_BACKEND`／`VPN_TYPE`／`VPN_SOURCE_CONFIG`；
+- VPN service `depends_on ddns-init: service_completed_successfully`，讀取
+  read-only `vpn-state`；watcher depends_on VPN service 與 healthy socket proxy；
+- `VPN_CONTAINER_NAME` 等於 VPN service 的 `container_name`；`RESTART_TARGETS`
+  恰好等於 VPN container（加 sidecar）；`VPN_HEALTH_PROBE` 為 `http://`／`tcp://`；
+- 只有 socket proxy 掛 docker.sock、`docker-api` internal、policy template
+  read-only、無上游粗粒度旗標；
+- 非 VPN service `cap_drop: ALL`；只有 bind-mount reader 加 `DAC_READ_SEARCH`；所有
+  service `no-new-privileges`、json-file rotation；helper 環境不含任何 secret；
+- 認證 pair 完整；非 loopback bind 時所有啟用的 proxy 都有認證。
+
+Backend invariant：Gluetun（custom provider、runtime profile path、WireGuard key 不在
+env、vproxy namespace／healthcheck、firewall ports）；OpenConnect（`NET_ADMIN`＋TUN
+且非 privileged、tunnel gate 環境、entrypoint 讀取 `vpn.env`／`vpn.conf`、
+healthcheck 內容、loopback-only）；sing-box（無 capability／TUN、read-only、tmpfs、
+`sing-box check`、managed 檔名、healthcheck 路徑、Clash API 探測）。
+
+`tests/compose-validation.sh` 的負面案例：public bind 無認證、三組 partial pair、
+moving tag、未知 `VPN_TYPE`、WireGuard MTU／implementation、`COMPOSE_FILE` 與
+`VPN_TYPE` 不符、OpenConnect 缺 server／partial credentials／public bind／錯誤
+`VPN_TYPE`、sing-box public 無認證／moving tag。正面案例：authenticated public
+bind、WireGuard、legacy alias 對應、OpenConnect loopback、sing-box loopback 與
+authenticated public、單 container backend 只有一個 restart target。
+
+## 真實 container 契約
 
 ```bash
 make test-container
 ```
 
-`tests/container-contract.sh` 會建立隔離的暫時 Compose project，完成下列驗證：
+`tests/container-contract.sh` 建立隔離的暫時 Compose project（`ddns-contract-<pid>`），
+不碰 operator 的 `.env` 與 state，trap 清除所有 container、network 與 volume：
 
-1. `docker-socket-proxy:v0.4.2` 在 `read_only`、`cap_drop: ALL`、最小
-   `DAC_READ_SEARCH`、tmpfs 與自訂 restart-only HAProxy policy 下能 healthy；
-2. `docker:29.6.1-cli-alpine3.24` 在沒有額外 package 的情況下可讀取 restrictive umask
-   checkout 的 `0700` mounted POSIX script，以及 host UID 擁有的 `0600` source profile；
-3. stock helper 可 validate／init render OpenVPN 與 WireGuard，runtime file 保持 `0600`；
-4. watcher 的 Docker client 可經 internal socket proxy restart 指定的 Gluetun 與
-   vproxy fixtures；
-5. 兩者 restart 後從 container 內讀到相同 network namespace identity；
-6. 同一路徑不得 restart 非目標 container，呼叫目標的 inspect、stop、kill、pause
-   與 remove 也必須全部收到拒絕；
-7. vproxy 在 read-only、drop-all、no-new-privileges 下仍可建立 SOCKS5 listener，且
-   stock image 具備 healthcheck 所需的 `wget`、`ip` 與 `grep`；
-8. trap 清除暫時 container、networks 與 volumes。
+### Gluetun backend
 
-這個測試特別保護 capability hardening 與 bind-mount mode 的交互作用。一般 host 上的
-直接 shell test 無法發現 container root 在移除 `CAP_DAC_OVERRIDE` 後讀不到 `0700`
-host file 的問題。
+1. socket proxy 在 `read_only`、`cap_drop: ALL`、`DAC_READ_SEARCH`、tmpfs 與
+   `RESTART_TARGETS` 產生的 policy 下 healthy；
+2. stock `docker:cli` 在無額外套件下讀取 `0700` script 目錄與 `0600` profile，
+   validate／init render OpenVPN 與 WireGuard，runtime file 為 `0600`；
+3. watcher 的 Docker client 可經 socket proxy restart 指定的 Gluetun 與 vproxy
+   fixture，restart 後兩者 network namespace 相同；
+4. 非目標 restart、inspect、stop、kill、pause、remove 全部被拒；
+5. vproxy 在 hardening 下建立 listener，且具備 healthcheck 需要的工具。
+
+### OpenConnect backend
+
+1. validate／init render `resolve=HOST:IP`、`non-inter`、`vpn.env`；
+2. container 以 `NET_ADMIN`＋TUN、非 privileged 啟動；entrypoint source 了 `vpn.env`；
+3. OpenConnect 確實嘗試連線 `resolve=` 指定的 IP（log
+   `Failed to connect to 127.0.0.1:1`）；
+4. tunnel 未建立時 `OPENCONNECT_PROXY_GATE` 有 REJECT 規則、`:8888` 拒絕連線、
+   watcher 的 `tcp://openconnect:8888` 探測失敗；
+5. 受限 API 可 restart、不可 inspect／stop。
+
+host 沒有 `/dev/net/tun` 時第 2–5 項會跳過並印出說明。
+
+### sing-box backend（端對端）
+
+1. 在 project network 啟動一個 sing-box Shadowsocks server 與一個 HTTP target；
+2. 以 `DDNS_OVERRIDE_IPS` 指向 server，`up --wait` 直到 healthcheck 經
+   `:1080` mixed inbound（帶認證）→ Shadowsocks outbound → server → target 成功；
+3. runtime profile 的 `"server"` 已是 server IP；container read-only、無 capability、
+   非 privileged；
+4. 從 host：未認證 HTTP 回 407；認證 HTTP 與 SOCKS5 回 204；錯誤 SOCKS5 密碼被拒；
+5. watcher 的 Clash API 探測回 2xx；受限 restart 後資料路徑恢復；inspect／stop 被拒。
 
 ## Static analysis
 
-CI 使用 ShellCheck 對所有 production／test shell scripts 執行 POSIX 模式：
-
-```bash
-shellcheck -s sh scripts/*.sh tests/*.sh
-```
-
-本機沒有 ShellCheck 時，可直接使用上游 image：
-
-```bash
-docker run --rm -v "$PWD:/mnt:ro" -w /mnt \
-  koalaman/shellcheck:v0.11.0 \
-  -s sh scripts/*.sh tests/*.sh
-```
-
-## 圖表驗證
-
-文件圖表使用 YAML-first draw.io workflow 產生，release 檢查結果：
-
-| Artifact | Structure | Node crossings | Edge crossings | Visual review |
-| --- | --- | ---: | ---: | --- |
-| `docs/assets/architecture.drawio` / `.svg` | XML passed | 0 | 0 | exported SVG inspected |
-| `docs/assets/ddns-recovery.drawio` / `.svg` | XML passed | 0 | 0 | exported SVG inspected |
-
-`.drawio` 是可編輯來源交付，`.svg` 是 GitHub 文件顯示格式。產生環境沒有 draw.io
-Desktop，所以依工具 fallback 契約輸出 SVG，而非 300 dpi PNG。
+CI 與 `make shellcheck` 對 `scripts/*.sh`、`scripts/lib/*.sh`、`scripts/adapters/*.sh`、
+`tests/*.sh` 以 POSIX 模式、`compat/watcher/*.sh` 以 bash 模式執行 ShellCheck。
 
 ## CI
 
-`.github/workflows/ci.yml` 在 push 與 pull request 執行：
+`.github/workflows/ci.yml` 在 push 與 pull request 執行 ShellCheck 與 `make check`；
+paths 包含 Compose、`compose/`、`docker/`、`.env.example`、scripts、tests、examples、
+Makefile 與所有文件。`publish-compat-watcher.yml` 只在 `compat/watcher/**` 改變時
+重新發布 frozen compatibility image（見 [spec §12](spec.md)）。
 
-1. checkout；
-2. 安裝 `jq`、`shellcheck`；
-3. ShellCheck；
-4. `make check`。
+## 圖表
 
-workflow paths 包含 Compose、environment example、scripts、tests、examples、Makefile、
-README 與 docs。專案沒有 image publish workflow，因為 production 架構不建置自有
-image。
+`docs/assets/*.drawio` 是可編輯來源，`.svg` 是 GitHub 顯示格式。架構圖以 Gluetun
+backend 為例；其他 backend 以單一 VPN container 取代 Gluetun＋vproxy，helper、
+socket proxy 與 state volume 相同。
 
 ## 真實 VPN 驗收
 
-自動測試不攜帶使用者的 provider credentials，也不能連到真實 OpenVPN／WireGuard
-server。
-production target 首次部署後必須完成以下驗收。
+自動測試不攜帶 provider credentials，也不連真實 VPN server。production target 首次
+部署後必須完成：
 
-### 1. Service health
-
-```bash
-docker compose ps --all
-```
-
-確認 init exited 0，其他四個 service healthy／running。
-
-### 2. Tunnel establishment
-
-```bash
-docker compose logs --tail=200 gluetun
-```
-
-確認所選 VPN 已建立 tunnel；OpenVPN 沒有 certificate／authentication／cipher error，
-WireGuard 沒有 key／address／route error，且兩者都沒有 firewall error。
-
-### 3. HTTP 與 SOCKS5 data path
-
-```bash
-curl -x http://127.0.0.1:8888 https://ifconfig.me
-curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
-```
-
-兩者應回傳相同 VPN exit IP，且與 host 直接連線的 public IP 不同。
-
-### 4. Authentication rejection
-
-公開 bind 前，用缺少或錯誤 credentials 測試 HTTP 與 SOCKS5，確認匿名 request 不會
-成功。
-
-### 5. Live DDNS failover drill
-
-在可控制的 staging hostname 上：
-
-1. 記錄目前 `last-ip` 與 Gluetun container start time；
-2. 將 A record 更新到另一台可用、提供相同協定與 credentials 的 VPN server；
-3. 等待 DNS TTL 與一個 poll interval；
-4. 確認 watcher 記錄 `reason=address-change`；
-5. 確認 `last-ip` 更新、Gluetun 先 restart 並 healthy、vproxy 隨後 restart；
-6. 比對兩個 container 的 network namespace identity，並確認兩個 proxy 恢復；
-7. 記錄實際中斷時間，確認符合服務 SLO。
-
-```bash
-docker compose logs -f ddns-watcher gluetun
-```
-
-不要在唯一 production endpoint 上做第一次 failover drill。
-
-### 6. DNS outage drill
-
-在 staging 暫時指定不可達 resolver，確認 watcher 記錄 warning，但 Gluetun 不被
-restart，既有 tunnel 仍傳輸。恢復 resolver 後應自行回到正常 polling。
-
-### 7. Host reboot drill
-
-重啟 target host，確認 Docker restart policy 恢復 long-running services；若停機期間
-改變 DDNS，watcher 應在一個 interval 內 render，並依序 restart Gluetun 與 vproxy。
+1. **Service health**：`docker compose ps --all`，init exited 0，其餘 healthy。
+2. **Tunnel establishment**：VPN container log 無認證／憑證／cipher／route／firewall
+   錯誤。
+3. **Data path**：HTTP 與 SOCKS5 都回傳相同 VPN 出口 IP，且與 host 直連不同。
+4. **Authentication rejection**：公開 bind 前，缺少或錯誤 credentials 必須被拒。
+5. **Live DDNS failover drill**（staging hostname）：記錄 `last-ip` 與 container
+   start time → 將 A record 改到另一台相同協定的 server → 等 TTL＋一個 poll →
+   確認 `reason=address-change`、`last-ip` 更新、restart chain 順序、proxy 恢復、
+   實際中斷時間符合 SLO。
+6. **DNS outage drill**：指定不可達 resolver，確認只有 WARN、tunnel 持續傳輸，恢復
+   後回到正常 polling。
+7. **Host reboot drill**：重啟 host，確認 restart policy 恢復服務；停機期間改變
+   DDNS 時一個 interval 內完成 restart chain。
 
 ## 自動測試未涵蓋
 
-- 真實 provider OpenVPN certificate／username／password 或 WireGuard key／address；
-- `/dev/net/tun` 與 target kernel 的相容性；
-- provider push routes、DNS 與 cipher negotiation；
-- host firewall 與 upstream network ACL；
-- 真實 HTTP CONNECT／SOCKS5 authentication through tunnel；
-- DDNS provider TTL 與全球 resolver propagation；
-- SELinux／AppArmor 的 host-specific socket policy；
-- 長時間 soak、packet loss、bandwidth saturation 與 SLO measurement。
-
-這些項目需要 staging／production 環境的真實驗收，不能用 narrow unit test 推論完成。
+- 真實 provider 的 OpenVPN／WireGuard／OpenConnect／sing-box server 與其認證；
+- `/dev/net/tun` 與 target kernel 的相容性、provider push routes、cipher negotiation；
+- host firewall、SELinux／AppArmor、DDNS provider TTL 與 resolver propagation；
+- OpenConnect 只用憑證登入、互動式 MFA；
+- 長時間 soak、packet loss、bandwidth 與 SLO 量測。
