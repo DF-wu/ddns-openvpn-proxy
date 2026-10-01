@@ -277,7 +277,9 @@ docker run -d --name "$http_target" --network "$project_network" alpine:3.22 sh 
 
 ss_server_ip=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$project_network\").IPAddress}}" "$ss_server")
 http_target_ip=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$project_network\").IPAddress}}" "$http_target")
-[ -n "$ss_server_ip" ] && [ -n "$http_target_ip" ] || fail 'could not determine fixture container addresses'
+if [ -z "$ss_server_ip" ] || [ -z "$http_target_ip" ]; then
+  fail 'could not determine fixture container addresses'
+fi
 
 export DDNS_OVERRIDE_IPS="$ss_server_ip"
 export SINGBOX_HEALTH_URL="http://$http_target_ip:8080/"
