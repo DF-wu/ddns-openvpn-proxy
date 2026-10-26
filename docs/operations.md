@@ -2,7 +2,7 @@
 
 ## 需求
 
-- Linux host、Docker Engine 24+、Docker Compose v2.20+
+- Linux host、Docker Engine 25+、Docker Compose v2.24+（healthcheck `start_interval`）
 - Gluetun／OpenConnect backend：`/dev/net/tun`
 - 可存取 Docker Hub 與 GHCR
 - 建議 `make` 與 `jq`（`make validate-compose` 需要），非必要
@@ -125,7 +125,9 @@ chmod 600 .env
 | `OPENCONNECT_SERVER` / `OPENCONNECT_PORT` | 空（必填） / `443` | OpenConnect |
 | `OPENCONNECT_USER` / `OPENCONNECT_PASSWORD` | 空 | OpenConnect（成對） |
 | `OPENCONNECT_TOTP_SECRET` / `OPENCONNECT_OPTIONS` / `OPENCONNECT_RECONNECT_DELAY` | 空 / 空 / `30` | OpenConnect |
-| `SINGBOX_DNS_SERVER` / `SINGBOX_LOG_LEVEL` | `1.1.1.1` / `info` | sing-box |
+| `SINGBOX_DNS_SERVER` / `SINGBOX_LOG_LEVEL` | `1.1.1.1` / `warn` | sing-box；`info` 以下記錄每條連線的目的地 |
+| `BLOCK_MALICIOUS` | `off` | Gluetun；`on` 改寫 DNS 答案並常駐 blocklist |
+| `PUBLICIP_ENABLED` | `off` | Gluetun；`on` 每次連線向第三方查詢並記錄出口 IP |
 | `SINGBOX_HEALTH_URL` / `SINGBOX_HEALTH_PROBE` | Cloudflare 204 / Clash API URL | sing-box |
 
 ### Polling 與 restart
@@ -152,11 +154,15 @@ chmod 600 .env
 | `HTTP_PROXY_PORT` / `SOCKS5_PROXY_PORT` | `8888` / `1080` | host port |
 | `HTTPPROXY` | `on` | HTTP proxy 開關（Gluetun、sing-box） |
 | `HTTPPROXY_USER` / `HTTPPROXY_PASSWORD` | 空 | 成對 |
-| `HTTPPROXY_STEALTH` | `off` | Gluetun 專用 |
 | `SOCKS5_USER` / `SOCKS5_PASSWORD` | 空 | 成對 |
-| `VPROXY_LOG` | `info` | vproxy log level |
+| `VPROXY_LOG` | `warn` | vproxy log level；`info` 以下每條連線寫 3 行（含目的地） |
 
 非 loopback bind 時，SOCKS5 與（開啟的）HTTP 都必須有完整認證。
+
+所有 backend 的 HTTP proxy 都對目的端透明：Gluetun 固定 stealth（不加
+`X-Forwarded-For`），OpenConnect 的 tinyproxy 不加 `Via`。`HTTPPROXY_STEALTH` 已移除；
+舊 `.env` 若仍設為 `off`，`make validate-compose` 會提示該值被忽略。詳見
+[spec §10.5](spec.md#105-透明與無痕)。
 
 ### Log rotation 與 images
 

@@ -101,6 +101,22 @@ if ! render_json docker-compose.yml "$legacy_env" | jq -e '
 fi
 printf 'ok %s - legacy OPENVPN_CONFIG_*/GLUETUN_CONTAINER_NAME aliases remain compatible\n' "$case_number"
 
+case_number=$((case_number + 1))
+stale_env=$(make_env 'HTTPPROXY_STEALTH=off')
+"$repo_root/scripts/validate-compose.sh" "$stale_env" >/dev/null 2>"$workdir/stale.err"
+if ! { grep -q 'HTTPPROXY_STEALTH .* is ignored' "$workdir/stale.err" &&
+       render_json docker-compose.yml "$stale_env" | jq -e '
+         .services.gluetun.environment.HTTPPROXY_STEALTH == "on" and
+         .services.gluetun.environment.BLOCK_MALICIOUS == "off" and
+         .services.gluetun.environment.PUBLICIP_ENABLED == "off" and
+         .services.vproxy.environment.VPROXY_LOG == "warn"
+       ' >/dev/null; }; then
+  printf 'not ok %s - Gluetun stays transparent and quiet even with a stale HTTPPROXY_STEALTH=off\n' \
+    "$case_number" >&2
+  exit 1
+fi
+printf 'ok %s - Gluetun stays transparent and quiet even with a stale HTTPPROXY_STEALTH=off\n' "$case_number"
+
 # --- OpenConnect backend --------------------------------------------------------
 
 openconnect_base='VPN_TYPE=openconnect VPN_CONFIG_DIR=./config/openconnect VPN_CONFIG_FILE=client.conf COMPOSE_FILE=docker-compose.openconnect.yml OPENCONNECT_SERVER=vpn.example.com OPENCONNECT_USER=alice OPENCONNECT_PASSWORD=secret'
@@ -152,5 +168,15 @@ if ! render_json docker-compose.singbox.yml "$singbox_env" | jq -e '
   exit 1
 fi
 printf 'ok %s - single-container backends expose exactly one restart target\n' "$case_number"
+
+case_number=$((case_number + 1))
+# shellcheck disable=SC2086
+singbox_env=$(make_env $singbox_base)
+if ! render_json docker-compose.singbox.yml "$singbox_env" |
+    jq -e '.services.singbox.environment.SINGBOX_LOG_LEVEL == "warn"' >/dev/null; then
+  printf 'not ok %s - sing-box does not log proxied destinations by default\n' "$case_number" >&2
+  exit 1
+fi
+printf 'ok %s - sing-box does not log proxied destinations by default\n' "$case_number"
 
 printf '1..%s\n' "$case_number"

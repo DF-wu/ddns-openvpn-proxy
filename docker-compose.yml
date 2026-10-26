@@ -68,10 +68,31 @@ services:
       HTTPPROXY_LISTENING_ADDRESS: :8888
       HTTPPROXY_USER: ${HTTPPROXY_USER:-}
       HTTPPROXY_PASSWORD: ${HTTPPROXY_PASSWORD:-}
-      HTTPPROXY_STEALTH: ${HTTPPROXY_STEALTH:-off}
+      # Transparency contract (not configurable): without stealth Gluetun
+      # adds X-Forwarded-For with the client IP to every plain-HTTP request,
+      # and the request log would record every destination.
+      HTTPPROXY_STEALTH: "on"
+      HTTPPROXY_LOG: "off"
+      # Transparent, quiet, low-footprint defaults: no DNS answer rewriting
+      # (and no blocklist download or in-memory list), no third-party
+      # public-IP or version lookups on each (re)connect, and no 7 MB
+      # servers.json written into the container layer (custom provider only).
+      BLOCK_MALICIOUS: ${BLOCK_MALICIOUS:-off}
+      PUBLICIP_ENABLED: ${PUBLICIP_ENABLED:-off}
+      VERSION_INFORMATION: "off"
+      STORAGE_FILEPATH: ""
       # vproxy shares this namespace; Gluetun must admit its listener and the
       # watcher's health probe.
       FIREWALL_INPUT_PORTS: "1080,9999"
+    # The image healthcheck (kept) runs every 5s, each a runc exec of the
+    # 24 MB gluetun binary. HEALTH_RESTART_VPN already self-heals the tunnel,
+    # so Docker only needs a slow status probe after start-up.
+    healthcheck:
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
 
   vproxy:
     image: ${VPROXY_IMAGE:-ghcr.io/0x676e67/vproxy:v2.5.5}
@@ -93,7 +114,8 @@ services:
       VPN_TYPE: ${VPN_TYPE:-openvpn}
       SOCKS5_USER: ${SOCKS5_USER:-}
       SOCKS5_PASSWORD: ${SOCKS5_PASSWORD:-}
-      VPROXY_LOG: ${VPROXY_LOG:-info}
+      # info logs every destination (3 lines per connection).
+      VPROXY_LOG: ${VPROXY_LOG:-warn}
     entrypoint:
       - /bin/sh
       - -ec
@@ -117,10 +139,11 @@ services:
           wget -q --spider -T 2 http://127.0.0.1:9999 &&
           test -d "/sys/class/net/$${interface}" &&
           ip -4 route get 1.1.1.1 2>/dev/null | grep -q " dev $${interface} "
-      interval: 10s
+      interval: 30s
       timeout: 3s
       retries: 3
-      start_period: 5s
+      start_period: 30s
+      start_interval: 2s
 
   docker-socket-proxy:
     extends:

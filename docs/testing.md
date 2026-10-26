@@ -58,12 +58,15 @@ rendered model 而非 YAML 文字。通用 invariant（所有 stack）：
   read-only、無上游粗粒度旗標；
 - 非 VPN service `cap_drop: ALL`；只有 bind-mount reader 加 `DAC_READ_SEARCH`；所有
   service `no-new-privileges`、json-file rotation；helper 環境不含任何 secret；
-- 認證 pair 完整；非 loopback bind 時所有啟用的 proxy 都有認證。
+- 認證 pair 完整；非 loopback bind 時所有啟用的 proxy 都有認證；
+- 除 `ddns-init` 外每個 service 都覆寫 healthcheck：`interval` ≥ 30s 且設定
+  `start_interval`（spec §10.6）。
 
 Backend invariant：Gluetun（custom provider、runtime profile path、WireGuard key 不在
-env、vproxy namespace／healthcheck、firewall ports）；OpenConnect（`NET_ADMIN`＋TUN
-且非 privileged、tunnel gate 環境、entrypoint 讀取 `vpn.env`／`vpn.conf`、
-healthcheck 內容、loopback-only）；sing-box（無 capability／TUN、read-only、tmpfs、
+env、vproxy namespace／healthcheck、firewall ports、stealth＋無 request log、不查詢
+GitHub／不寫 `servers.json`）；OpenConnect（`NET_ADMIN`＋TUN 且非 privileged、tunnel
+gate 環境、entrypoint 讀取 `vpn.env`／`vpn.conf`、healthcheck 內容、loopback-only、
+tinyproxy 無 `Via`／microsocks `-q`）；sing-box（無 capability／TUN、read-only、tmpfs、
 `sing-box check`、managed 檔名、healthcheck 路徑、Clash API 探測）。
 
 `tests/compose-validation.sh` 的負面案例：public bind 無認證、三組 partial pair、
@@ -71,7 +74,8 @@ moving tag、未知 `VPN_TYPE`、WireGuard MTU／implementation、`COMPOSE_FILE`
 `VPN_TYPE` 不符、OpenConnect 缺 server／partial credentials／public bind／錯誤
 `VPN_TYPE`、sing-box public 無認證／moving tag。正面案例：authenticated public
 bind、WireGuard、legacy alias 對應、OpenConnect loopback、sing-box loopback 與
-authenticated public、單 container backend 只有一個 restart target。
+authenticated public、單 container backend 只有一個 restart target、殘留
+`HTTPPROXY_STEALTH=off` 時 Gluetun 仍透明且提示、vproxy／sing-box 預設 `warn`。
 
 ## 真實 container 契約
 
@@ -101,9 +105,11 @@ make test-container
    `Failed to connect to 127.0.0.1:1`）；
 4. tunnel 未建立時 `OPENCONNECT_PROXY_GATE` 有 REJECT 規則、`:8888` 拒絕連線、
    watcher 的 `tcp://openconnect:8888` 探測失敗；
-5. 受限 API 可 restart、不可 inspect／stop。
+5. 受限 API 可 restart、不可 inspect／stop；
+6. restart 後 microsocks 以 `-q` 執行，tinyproxy 恰有一行 `DisableViaHeader Yes`、
+   無 `ViaProxyName`、不記錄連線（透明 patch 冪等）。
 
-host 沒有 `/dev/net/tun` 時第 2–5 項會跳過並印出說明。
+host 沒有 `/dev/net/tun` 時第 2–6 項會跳過並印出說明。
 
 ### sing-box backend（端對端）
 

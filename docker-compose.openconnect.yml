@@ -77,6 +77,19 @@ services:
         export OPENCONNECT_URL="$${DDNS_VPN_URL}"
         export OPENCONNECT_OPTIONS="--config=/state/runtime/vpn.conf $${OPENCONNECT_OPTIONS}"
         echo "ddns-vpn: connecting to $${OPENCONNECT_URL} via $${DDNS_VPN_IP}"
+        # Transparent, quiet proxies. The image hard-codes a tinyproxy Via
+        # header, per-connection logging, and a 10-client cap (browsers open
+        # far more), and starts microsocks without -q, which logs every
+        # destination. Patch the container layer; idempotent across restarts.
+        sed -i -e '/^ViaProxyName/d' -e '/^DisableViaHeader/d' \
+          -e 's/^LogLevel .*/LogLevel Error/' -e 's/^MaxClients .*/MaxClients 100/' \
+          /etc/tinyproxy.conf
+        echo 'DisableViaHeader Yes' >> /etc/tinyproxy.conf
+        if [ ! -e /usr/local/bin/microsocks.real ]; then
+          mv /usr/local/bin/microsocks /usr/local/bin/microsocks.real
+          printf '#!/bin/sh\nexec /usr/local/bin/microsocks.real -q "$$@"\n' > /usr/local/bin/microsocks
+          chmod 0755 /usr/local/bin/microsocks
+        fi
         exec /usr/local/bin/fix-dns /entrypoint.sh
     healthcheck:
       test:
@@ -89,7 +102,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 60s
+      start_interval: 2s
 
   docker-socket-proxy:
     extends:

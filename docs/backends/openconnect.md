@@ -92,6 +92,10 @@ OPENCONNECT_PASSWORD=replace-with-the-vpn-password
   （TCP RST）。watcher 的就緒探測 `tcp://openconnect:8888` 因此只有在 tunnel
   建立後才成功。
 - healthcheck：`tun0` UP、預設 route 走 `tun0`、兩個 listener 存在。
+- **透明與無痕**：上游 image 的 tinyproxy 會加 `Via: 1.1 tinyproxy`、記錄每條連線，
+  且 `MaxClients 10`（瀏覽器很快用完）；microsocks 未加 `-q` 時會記錄每個目的地。
+  stack 在 container layer 上改為 `DisableViaHeader Yes`、`LogLevel Error`、
+  `MaxClients 100`，並以 wrapper 讓 microsocks 帶 `-q` 啟動；重複 restart 仍是冪等。
 
 ## 限制
 

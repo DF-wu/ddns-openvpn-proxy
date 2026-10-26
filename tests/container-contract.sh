@@ -237,6 +237,18 @@ if [ -c /dev/net/tun ]; then
   restarted=$(compose docker-compose.openconnect.yml run --rm --no-deps --entrypoint docker ddns-watcher \
     container restart --timeout 2 -- "$openconnect_target")
   [ "$restarted" = "$openconnect_target" ] || fail 'restricted Docker API did not restart the OpenConnect target'
+  # The transparency patch must survive (and not stack up across) restarts.
+  attempt=1
+  until docker exec "$openconnect_target" /bin/sh -c 'ps -o args | grep -q "^/usr/local/bin/microsocks.real -q "' 2>/dev/null; do
+    [ "$attempt" -lt 30 ] || fail 'microsocks must run with -q (no per-destination logging) after a restart'
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  [ "$(docker exec "$openconnect_target" grep -c '^DisableViaHeader Yes$' /etc/tinyproxy.conf)" = 1 ] ||
+    fail 'tinyproxy must disable its Via header exactly once'
+  if docker exec "$openconnect_target" grep -Eq '^(ViaProxyName|LogLevel (Info|Connect|Notice))' /etc/tinyproxy.conf; then
+    fail 'tinyproxy must neither name itself in Via nor log connections'
+  fi
   assert_docker_denied docker-compose.openconnect.yml inspect container inspect "$openconnect_target"
   assert_docker_denied docker-compose.openconnect.yml stop container stop "$openconnect_target"
   printf 'OpenConnect backend contract passed.\n'

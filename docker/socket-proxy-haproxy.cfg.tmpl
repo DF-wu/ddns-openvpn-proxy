@@ -1,7 +1,11 @@
 global
     log stdout format raw daemon "${LOG_LEVEL}"
     pidfile /run/haproxy.pid
-    maxconn 256
+    # The watcher is the only client and issues one request at a time, so a
+    # single thread and a small connection table keep the resident footprint
+    # minimal on small hosts.
+    nbthread 1
+    maxconn 32
 
 defaults
     mode http

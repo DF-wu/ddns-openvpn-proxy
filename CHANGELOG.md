@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+### Changed — 小主機效率與透明／無痕
+
+- **Gluetun HTTP proxy 固定 stealth**：原預設 `HTTPPROXY_STEALTH=off` 會對每個明文
+  HTTP request 加上 `X-Forwarded-For: <client IP>`，洩漏 client 位址並暴露 proxy。
+  現在固定 `on` 且 `HTTPPROXY_LOG=off`，不可覆寫；`.env` 殘留的
+  `HTTPPROXY_STEALTH=off` 會被忽略並由 validator 提示。
+- **OpenConnect proxy 透明化**：tinyproxy 不再加 `Via: 1.1 tinyproxy`、不記錄連線、
+  `MaxClients` 由 10 提高到 100；microsocks 以 `-q` 執行，不再記錄每個目的地。
+- **預設不記錄目的地**：`VPROXY_LOG` 與 `SINGBOX_LOG_LEVEL` 預設由 `info` 改為
+  `warn`（`info` 每條連線寫入 3 行含目的地的 log）。既有 `.env` 需自行改值。
+- **Gluetun 減少外部查詢與記憶體**：新增 `BLOCK_MALICIOUS`、`PUBLICIP_ENABLED`
+  （預設皆 `off`），固定 `VERSION_INFORMATION=off`、`STORAGE_FILEPATH=`（不再把
+  7 MB `servers.json` 寫入 container layer）。單核實測啟動後 RSS 87.5 → 76.8 MiB
+  （尚未計入連線後下載的 blocklist）。
+- **Healthcheck 節奏**：Gluetun image 內建 5s healthcheck（每次 exec 24 MB binary）
+  改為 30s；vproxy 10s → 30s、docker-socket-proxy 10s → 60s、watcher 30s → 60s、
+  sing-box 30s → 60s；全部以 `start_interval` 維持啟動速度。Gluetun stack 每分鐘
+  `runc exec` 由約 26 次降為 6 次。
+- **docker-socket-proxy**：HAProxy 移除 master-worker（`-W`）、`nbthread 1`、
+  `maxconn 32`；單核實測 11.3 → 8.4 MiB。
+- 需求提高為 Docker Engine 25+、Docker Compose v2.24+（`start_interval`）。
+
 ### Added
 
 - 正式規格文件 `docs/spec.md`：術語、backend／adapter 模型、設定契約、runtime
