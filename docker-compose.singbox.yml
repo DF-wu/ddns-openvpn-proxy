@@ -1,0 +1,159 @@
+# sing-box backend stack: Shadowsocks, VMess, VLESS, Trojan, Hysteria2, TUIC,
+# ShadowTLS, AnyTLS, SSH and other sing-box outbounds. sing-box runs in
+# proxy-only mode (no TUN, no NET_ADMIN); the stack renders the inbound
+# listeners, DNS, and default route so credentials and leak protection come
+# from .env, while the profile only describes the outbound.
+#
+# Select with: COMPOSE_FILE=docker-compose.singbox.yml in .env
+name: ${COMPOSE_PROJECT_NAME:-ddns-openvpn-proxy}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILE:-3}
+
+x-helper-environment: &helper-environment
+  VPN_BACKEND: singbox
+  VPN_TYPE: ${VPN_TYPE:-singbox}
+  VPN_SOURCE_CONFIG: /source/${VPN_CONFIG_FILE:-config.json}
+  VPN_CONTAINER_NAME: ${VPN_CONTAINER_NAME:-ddns-singbox-proxy}
+  # Clash API URL test through the "vpn" outbound: succeeds only when the
+  # data path works, which is what "ready" means after a restart.
+  VPN_HEALTH_PROBE: ${SINGBOX_HEALTH_PROBE:-http://singbox:9090/proxies/vpn/delay?timeout=5000&url=http%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204}
+
+services:
+  ddns-init:
+    extends:
+      file: compose/core.yml
+      service: ddns-init
+    volumes:
+      - ${VPN_CONFIG_DIR:-./config/sing-box}:/source:ro
+    environment:
+      <<: *helper-environment
+
+  singbox:
+    image: ${SINGBOX_IMAGE:-ghcr.io/sagernet/sing-box:v1.14.2}
+    container_name: ${VPN_CONTAINER_NAME:-ddns-singbox-proxy}
+    restart: unless-stopped
+    depends_on:
+      ddns-init:
+        condition: service_completed_successfully
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+      - /run/sing-box:size=8m,mode=0700
+    logging: *default-logging
+    ports:
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${HTTP_PROXY_PORT:-8888}:8888/tcp"
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${SOCKS5_PROXY_PORT:-1080}:1080/tcp"
+    volumes:
+      - ${VPN_CONFIG_DIR:-./config/sing-box}:/source:ro
+      - vpn-state:/state:ro
+    environment:
+      TZ: ${TZ:-UTC}
+      HTTPPROXY: ${HTTPPROXY:-on}
+      HTTPPROXY_USER: ${HTTPPROXY_USER:-}
+      HTTPPROXY_PASSWORD: ${HTTPPROXY_PASSWORD:-}
+      SOCKS5_USER: ${SOCKS5_USER:-}
+      SOCKS5_PASSWORD: ${SOCKS5_PASSWORD:-}
+      # info logs every inbound/outbound destination.
+      SINGBOX_LOG_LEVEL: ${SINGBOX_LOG_LEVEL:-warn}
+      SINGBOX_DNS_SERVER: ${SINGBOX_DNS_SERVER:-1.1.1.1}
+      SINGBOX_HEALTH_URL: ${SINGBOX_HEALTH_URL:-http://cp.cloudflare.com/generate_204}
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - |
+        # sing-box merges a config directory in file-name order and the first
+        # file wins for scalar keys, so the managed file sorts before the
+        # profile rendered by the helper.
+        dir=/run/sing-box
+        escape() { printf '%s' "$$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+        users() {
+          if [ -n "$$1" ]; then
+            printf '[{"username":"%s","password":"%s"}]' "$$(escape "$$1")" "$$(escape "$$2")"
+          else
+            printf '[]'
+          fi
+        }
+        http_inbound=
+        if [ "$${HTTPPROXY}" = on ]; then
+          http_inbound="{\"type\":\"mixed\",\"tag\":\"http-in\",\"listen\":\"0.0.0.0\",\"listen_port\":8888,\"users\":$$(users "$${HTTPPROXY_USER}" "$${HTTPPROXY_PASSWORD}")},"
+        fi
+        cp /state/runtime/vpn.conf "$${dir}/10-profile.json"
+        cat > "$${dir}/00-managed.json" <<EOF
+        {
+          "log": {"level": "$${SINGBOX_LOG_LEVEL}", "timestamp": true},
+          "dns": {
+            "servers": [
+              {"tag": "vpn-dns", "type": "udp", "server": "$${SINGBOX_DNS_SERVER}", "detour": "vpn"},
+              {"tag": "local-dns", "type": "local"}
+            ],
+            "final": "vpn-dns"
+          },
+          "inbounds": [
+            $${http_inbound}
+            {"type": "mixed", "tag": "socks-in", "listen": "0.0.0.0", "listen_port": 1080,
+             "users": $$(users "$${SOCKS5_USER}" "$${SOCKS5_PASSWORD}")}
+          ],
+          "route": {"final": "vpn", "default_domain_resolver": "local-dns"},
+          "experimental": {"clash_api": {"external_controller": "0.0.0.0:9090"}}
+        }
+        EOF
+        cat > "$${dir}/healthcheck.sh" <<'EOF'
+        #!/bin/sh
+        set -eu
+        auth=
+        if [ -n "$${SOCKS5_USER}" ]; then
+          auth="--header=Proxy-Authorization: Basic $$(printf '%s:%s' "$${SOCKS5_USER}" "$${SOCKS5_PASSWORD}" | base64 | tr -d '\n')"
+        fi
+        http_proxy=http://127.0.0.1:1080 exec wget -q -O /dev/null -T 5 $${auth:+"$${auth}"} "$${SINGBOX_HEALTH_URL}"
+        EOF
+        sing-box check -C "$${dir}"
+        exec sing-box -D "$${dir}" -C "$${dir}" run
+    healthcheck:
+      test:
+        - CMD
+        - /bin/sh
+        - /run/sing-box/healthcheck.sh
+      # Each probe fetches SINGBOX_HEALTH_URL through the tunnel.
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+      start_interval: 3s
+
+  docker-socket-proxy:
+    extends:
+      file: compose/core.yml
+      service: docker-socket-proxy
+    environment:
+      RESTART_TARGETS: ${VPN_CONTAINER_NAME:-ddns-singbox-proxy}
+
+  ddns-watcher:
+    extends:
+      file: compose/core.yml
+      service: ddns-watcher
+    depends_on:
+      singbox:
+        condition: service_started
+      docker-socket-proxy:
+        condition: service_healthy
+    volumes:
+      - ${VPN_CONFIG_DIR:-./config/sing-box}:/source:ro
+    environment:
+      <<: *helper-environment
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+
+networks:
+  docker-api:
+    internal: true
+
+volumes:
+  vpn-state:
