@@ -84,7 +84,7 @@ SOCKS5_PASSWORD=replace-with-another-long-random-password
 | 變數 | 預設 | 說明 |
 | --- | --- | --- |
 | `SINGBOX_DNS_SERVER` | `1.1.1.1` | 經 tunnel 使用的 UDP DNS server |
-| `SINGBOX_LOG_LEVEL` | `info` | sing-box log level |
+| `SINGBOX_LOG_LEVEL` | `warn` | sing-box log level；`info` 以下記錄每條連線的目的地 |
 | `SINGBOX_HEALTH_URL` | `http://cp.cloudflare.com/generate_204` | container healthcheck 經 `:1080` inbound 抓取的 URL |
 | `SINGBOX_HEALTH_PROBE` | Clash API delay URL | watcher 的就緒探測（見 spec §7.3） |
 | `SINGBOX_IMAGE` | `ghcr.io/sagernet/sing-box:v1.14.2` | image pin |

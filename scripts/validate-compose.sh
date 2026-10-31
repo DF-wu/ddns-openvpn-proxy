@@ -177,6 +177,14 @@ assert_jq 'all([.services."ddns-init", .services."ddns-watcher"][];
   'helper services must receive only credential-presence flags, never secrets'
 assert_jq 'all(.services[]; (.image | contains("ddns-openvpn-proxy-watcher") | not))' \
   'the removed project-specific watcher image must not return'
+# Every healthcheck run is a runc exec; on small hosts fast probes dominate
+# steady-state CPU. Probe quickly only during start-up (start_interval).
+assert_jq 'def seconds: capture("^((?<h>[0-9]+)h)?((?<m>[0-9]+)m)?((?<s>[0-9]+)s)?$")
+             | ((.h // "0" | tonumber) * 3600 + (.m // "0" | tonumber) * 60 + (.s // "0" | tonumber));
+           all(.services | to_entries[] | select(.key != "ddns-init") | .value;
+             (.healthcheck.interval // "0s" | seconds) >= 30 and
+             (.healthcheck.start_interval // "" | length > 0))' \
+  'every long-running service must override its healthcheck to probe at most every 30s after start-up'
 
 images=$(jq -r '.services[].image' "$rendered" | sort -u)
 for image in $images; do
@@ -226,6 +234,16 @@ validate_gluetun() {
     'vproxy healthcheck must verify Gluetun health, the VPN interface, and VPN route'
   assert_jq '[.services.gluetun.ports[].target] | sort == [1080, 8888]' \
     'Gluetun must publish the HTTP proxy (8888) and the vproxy SOCKS5 listener (1080)'
+  assert_jq '.services.gluetun.environment.HTTPPROXY_STEALTH == "on" and
+             .services.gluetun.environment.HTTPPROXY_LOG == "off"' \
+    'Gluetun HTTP proxy must be transparent (no X-Forwarded-For) and must not log requests'
+  assert_jq '.services.gluetun.environment.VERSION_INFORMATION == "off" and
+             .services.gluetun.environment.STORAGE_FILEPATH == ""' \
+    'Gluetun must not query GitHub for versions or write servers.json into the container layer'
+  case $(env_value HTTPPROXY_STEALTH) in
+    ''|on) ;;
+    *) printf 'WARNING: HTTPPROXY_STEALTH in %s is ignored; the Gluetun HTTP proxy is always transparent\n' "$label" >&2 ;;
+  esac
 
   wireguard_allowed_ips=$(jq -r '.services.gluetun.environment.WIREGUARD_ALLOWED_IPS // ""' "$rendered")
   wireguard_mtu=$(jq -r '.services.gluetun.environment.WIREGUARD_MTU // ""' "$rendered")
@@ -273,6 +291,11 @@ validate_openconnect() {
     'OpenConnect healthcheck must verify the tunnel interface, route, and both listeners'
   assert_jq '[.services.openconnect.ports[].target] | sort == [8888, 8889]' \
     'OpenConnect must publish tinyproxy (8888) and microsocks (8889)'
+  assert_jq '(.services.openconnect.command[0] |
+               contains("DisableViaHeader Yes") and
+               contains("LogLevel Error") and
+               contains("microsocks.real -q"))' \
+    'OpenConnect proxies must be transparent (no Via header) and must not log destinations'
   assert_jq '.services."ddns-watcher".environment.VPN_HEALTH_PROBE == "tcp://openconnect:8888" and
              ((.services."ddns-watcher".environment.SIDECAR_CONTAINER_NAME // "") == "")' \
     'OpenConnect readiness is the gated HTTP listener and there is no sidecar'

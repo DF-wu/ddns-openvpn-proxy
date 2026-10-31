@@ -74,10 +74,14 @@ services:
         - /bin/sh
         - /opt/ddns/ddns-vpn.sh
         - healthcheck
-      interval: 30s
+      # Each probe is a runc exec; the heartbeat tolerates several missed
+      # polls, so once a minute is enough. start_interval keeps
+      # `up --wait` fast without paying the fast cadence forever.
+      interval: 60s
       timeout: 5s
       retries: 3
       start_period: 30s
+      start_interval: 2s
 
   # Restrict the watcher to Docker's restart endpoint for the configured
   # targets instead of mounting the host socket into the watcher. The exact
@@ -135,7 +139,8 @@ services:
           /@RESTART_RULES@/ { printf "%s", rules; next }
           { print }
         ' /usr/local/etc/haproxy/restart-only.cfg.tmpl > /tmp/restart-only.cfg
-        exec haproxy -W -db -f /tmp/restart-only.cfg
+        # No -W: master-worker mode only adds a second resident process.
+        exec haproxy -db -f /tmp/restart-only.cfg
     networks:
       - docker-api
     healthcheck:
@@ -145,7 +150,8 @@ services:
         - -q
         - --spider
         - http://127.0.0.1:2375/_ping
-      interval: 10s
+      interval: 60s
       timeout: 3s
       retries: 3
-      start_period: 5s
+      start_period: 10s
+      start_interval: 1s

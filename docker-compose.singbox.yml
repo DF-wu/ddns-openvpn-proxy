@@ -61,7 +61,8 @@ services:
       HTTPPROXY_PASSWORD: ${HTTPPROXY_PASSWORD:-}
       SOCKS5_USER: ${SOCKS5_USER:-}
       SOCKS5_PASSWORD: ${SOCKS5_PASSWORD:-}
-      SINGBOX_LOG_LEVEL: ${SINGBOX_LOG_LEVEL:-info}
+      # info logs every inbound/outbound destination.
+      SINGBOX_LOG_LEVEL: ${SINGBOX_LOG_LEVEL:-warn}
       SINGBOX_DNS_SERVER: ${SINGBOX_DNS_SERVER:-1.1.1.1}
       SINGBOX_HEALTH_URL: ${SINGBOX_HEALTH_URL:-http://cp.cloudflare.com/generate_204}
     entrypoint:
@@ -121,10 +122,12 @@ services:
         - CMD
         - /bin/sh
         - /run/sing-box/healthcheck.sh
-      interval: 30s
+      # Each probe fetches SINGBOX_HEALTH_URL through the tunnel.
+      interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 30s
+      start_interval: 3s
 
   docker-socket-proxy:
     extends:

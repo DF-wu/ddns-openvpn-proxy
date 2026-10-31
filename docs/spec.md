@@ -131,14 +131,15 @@ version-pinned 的上游 image。本專案不建置任何 image。
 時必填）、`OPENVPN_VERBOSITY`、`WIREGUARD_ALLOWED_IPS`（非空）、
 `WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL`、`WIREGUARD_MTU`（576..65535）、
 `WIREGUARD_IMPLEMENTATION`（`auto`／`userspace`／`kernelspace`）、
-`VPROXY_CONTAINER_NAME`（sidecar，必須與 `VPN_CONTAINER_NAME` 不同）、`VPROXY_LOG`、
-`HTTPPROXY_STEALTH`。
+`VPROXY_CONTAINER_NAME`（sidecar，必須與 `VPN_CONTAINER_NAME` 不同）、`VPROXY_LOG`
+（預設 `warn`）、`BLOCK_MALICIOUS`（預設 `off`）、`PUBLICIP_ENABLED`（預設 `off`）。
+`HTTPPROXY_STEALTH` 不再可設定（固定 `on`，見 §10.5）。
 
 **openconnect**：`OPENCONNECT_SERVER`（必填，hostname）、`OPENCONNECT_PORT`
 （預設 443）、`OPENCONNECT_USER`／`OPENCONNECT_PASSWORD`（成對）、
 `OPENCONNECT_TOTP_SECRET`、`OPENCONNECT_OPTIONS`、`OPENCONNECT_RECONNECT_DELAY`。
 
-**singbox**：`SINGBOX_DNS_SERVER`（預設 `1.1.1.1`）、`SINGBOX_LOG_LEVEL`、
+**singbox**：`SINGBOX_DNS_SERVER`（預設 `1.1.1.1`）、`SINGBOX_LOG_LEVEL`（預設 `warn`）、
 `SINGBOX_HEALTH_URL`、`SINGBOX_HEALTH_PROBE`。
 
 ### 4.4 Legacy alias
@@ -375,6 +376,32 @@ IP 與 fingerprint 都不變時不得產生 INFO log。
 | openconnect | proxy 連線被 RST | 上游 tunnel gate（iptables REJECT on 8888/8889 直到 tun0 UP） |
 | singbox | 連線失敗 | 無 TUN、無 direct outbound；`route.final=vpn`；client DNS 經 `vpn` detour |
 
+### 10.5 透明與無痕
+
+Proxy 對目的端必須透明，且預設不在 host 留下瀏覽紀錄。Compose validator 強制下列
+不可覆寫的 invariant：
+
+| Backend | 透明（不改寫 request） | 不記錄目的地 |
+| --- | --- | --- |
+| gluetun | `HTTPPROXY_STEALTH=on`（否則加 `X-Forwarded-For: <client IP>`） | `HTTPPROXY_LOG=off` |
+| openconnect | tinyproxy `DisableViaHeader Yes`（上游 image 預設加 `Via: 1.1 tinyproxy`） | tinyproxy `LogLevel Error`；microsocks `-q` |
+| singbox | mixed inbound 本身不改寫 header | — |
+
+可調整但預設安靜的設定：`VPROXY_LOG`、`SINGBOX_LOG_LEVEL` 預設 `warn`（`info`
+以下每條連線都記錄目的地）。Gluetun 另外預設 `BLOCK_MALICIOUS=off`（不改寫 DNS
+答案、不下載 blocklist）、`PUBLICIP_ENABLED=off`（每次連線不向第三方 echo 服務查詢
+出口 IP），並固定 `VERSION_INFORMATION=off`、`STORAGE_FILEPATH=`（不查詢 GitHub、
+不把 7 MB `servers.json` 寫入 container layer）。
+
+### 10.6 資源預算
+
+目標 host 可小至 1 vCPU／1 GB。每次 Docker healthcheck 都是一次 `runc exec`，
+因此所有常駐 service 必須覆寫 healthcheck：啟動後 `interval` ≥ 30s，並以
+`start_interval` 在 `start_period` 內快速探測，讓 `up --wait` 與 `depends_on:
+service_healthy` 不變慢。Gluetun image 內建 5s healthcheck 的 `test` 保留，只覆寫
+節奏。`docker-socket-proxy` 以單一 HAProxy process（無 master-worker）、
+`nbthread 1`、`maxconn 32` 執行。
+
 ## 11. Health model
 
 | Service | 機制 |
@@ -382,7 +409,7 @@ IP 與 fingerprint 都不變時不得產生 INFO log。
 | `ddns-init` | one-shot；`Exited (0)` 是正常 |
 | `ddns-watcher` | §7.4 heartbeat |
 | `docker-socket-proxy` | `GET /_ping` |
-| `gluetun` | 上游 healthcheck；`HEALTH_RESTART_VPN=on` |
+| `gluetun` | 上游 healthcheck 指令（節奏見 §10.6）；`HEALTH_RESTART_VPN=on` |
 | `vproxy` | `:1080` listener、Gluetun `:9999`、VPN interface 存在、預設 route 走該 interface |
 | `openconnect` | `tun0` UP、預設 route 走 `tun0`、`:8888` 與 `:8889` listening |
 | `singbox` | 經 `:1080` mixed inbound（含認證）抓取 `SINGBOX_HEALTH_URL` |

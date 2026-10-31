@@ -52,7 +52,7 @@ IKEv2／L2TP／SSTP 不在目前契約內（原因見 [spec §1.4、§13.1](docs
 
 ### 1. 準備環境
 
-Linux 主機、Docker Engine、Docker Compose v2；Gluetun／OpenConnect backend 另需
+Linux 主機、Docker Engine 25+、Docker Compose v2.24+；Gluetun／OpenConnect backend 另需
 `/dev/net/tun`：
 
 ```bash
