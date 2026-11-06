@@ -6,7 +6,9 @@ on:
     branches: [main, master]
     paths:
       - '.github/workflows/ci.yml'
-      - 'docker-compose.yml'
+      - 'docker-compose*.yml'
+      - 'compose/**'
+      - 'docker/**'
       - '.env.example'
       - '.markdownlint-cli2.jsonc'
       - 'scripts/**'
@@ -14,12 +16,15 @@ on:
       - 'examples/**'
       - 'Makefile'
       - 'README.md'
+      - 'CHANGELOG.md'
       - 'docs/**'
   pull_request:
     branches: [main, master]
     paths:
       - '.github/workflows/ci.yml'
-      - 'docker-compose.yml'
+      - 'docker-compose*.yml'
+      - 'compose/**'
+      - 'docker/**'
       - '.env.example'
       - '.markdownlint-cli2.jsonc'
       - 'scripts/**'
@@ -27,6 +32,7 @@ on:
       - 'examples/**'
       - 'Makefile'
       - 'README.md'
+      - 'CHANGELOG.md'
       - 'docs/**'
 
 concurrency:
@@ -39,7 +45,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -51,7 +57,7 @@ jobs:
 
       - name: Check shell scripts
         run: |
-          shellcheck -s sh scripts/*.sh tests/*.sh
+          shellcheck -s sh scripts/*.sh scripts/lib/*.sh scripts/adapters/*.sh tests/*.sh
           shellcheck -s bash compat/watcher/*.sh
 
       - name: Validate and test repository

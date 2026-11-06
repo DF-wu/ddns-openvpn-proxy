@@ -1,0 +1,135 @@
+# OpenConnect backend stack: AnyConnect/ocserv, GlobalProtect, Pulse, F5,
+# Fortinet, Array via openconnect-proxy. The image provides HTTP (tinyproxy)
+# and SOCKS5 (microsocks) listeners gated by tunnel state; neither supports
+# authentication, so this stack is loopback-only.
+#
+# Select with: COMPOSE_FILE=docker-compose.openconnect.yml in .env
+name: ${COMPOSE_PROJECT_NAME:-ddns-openvpn-proxy}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILE:-3}
+
+x-helper-environment: &helper-environment
+  VPN_BACKEND: openconnect
+  VPN_TYPE: ${VPN_TYPE:-openconnect}
+  VPN_SOURCE_CONFIG: /source/${VPN_CONFIG_FILE:-client.conf}
+  VPN_CONTAINER_NAME: ${VPN_CONTAINER_NAME:-ddns-openconnect-proxy}
+  # The tunnel gate rejects proxy connections until tun0 is up, so a plain
+  # TCP connect doubles as the tunnel readiness signal.
+  VPN_HEALTH_PROBE: tcp://openconnect:8888
+  OPENCONNECT_SERVER: ${OPENCONNECT_SERVER:-}
+  OPENCONNECT_PORT: ${OPENCONNECT_PORT:-443}
+
+services:
+  ddns-init:
+    extends:
+      file: compose/core.yml
+      service: ddns-init
+    volumes:
+      - ${VPN_CONFIG_DIR:-./config/openconnect}:/source:ro
+    environment:
+      <<: *helper-environment
+
+  openconnect:
+    image: ${OPENCONNECT_IMAGE:-wazum/openconnect-proxy:2.1.0}
+    container_name: ${VPN_CONTAINER_NAME:-ddns-openconnect-proxy}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      ddns-init:
+        condition: service_completed_successfully
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    ports:
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${HTTP_PROXY_PORT:-8888}:8888/tcp"
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${SOCKS5_PROXY_PORT:-1080}:8889/tcp"
+    volumes:
+      - ${VPN_CONFIG_DIR:-./config/openconnect}:/source:ro
+      - vpn-state:/state:ro
+    environment:
+      TZ: ${TZ:-UTC}
+      OPENCONNECT_USER: ${OPENCONNECT_USER:-}
+      OPENCONNECT_PASSWORD: ${OPENCONNECT_PASSWORD:-}
+      OPENCONNECT_TOTP_SECRET: ${OPENCONNECT_TOTP_SECRET:-}
+      OPENCONNECT_OPTIONS: ${OPENCONNECT_OPTIONS:-}
+      TUNNEL_GATE: "1"
+      TUNNEL_GATE_INTERFACE: tun0
+      PROXY_PORT: "8888"
+      SOCKS_PORT: "8889"
+      RECONNECT_DELAY: ${OPENCONNECT_RECONNECT_DELAY:-30}
+      MAX_RECONNECT_ATTEMPTS: "0"
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - |
+        # The helper renders /state/runtime/vpn.conf (OpenConnect --config
+        # format with resolve=HOST:IP appended) and vpn.env (the gateway URL).
+        . /state/runtime/vpn.env
+        export OPENCONNECT_URL="$${DDNS_VPN_URL}"
+        export OPENCONNECT_OPTIONS="--config=/state/runtime/vpn.conf $${OPENCONNECT_OPTIONS}"
+        echo "ddns-vpn: connecting to $${OPENCONNECT_URL} via $${DDNS_VPN_IP}"
+        # Transparent, quiet proxies. The image hard-codes a tinyproxy Via
+        # header, per-connection logging, and a 10-client cap (browsers open
+        # far more), and starts microsocks without -q, which logs every
+        # destination. Patch the container layer; idempotent across restarts.
+        sed -i -e '/^ViaProxyName/d' -e '/^DisableViaHeader/d' \
+          -e 's/^LogLevel .*/LogLevel Error/' -e 's/^MaxClients .*/MaxClients 100/' \
+          /etc/tinyproxy.conf
+        echo 'DisableViaHeader Yes' >> /etc/tinyproxy.conf
+        if [ ! -e /usr/local/bin/microsocks.real ]; then
+          mv /usr/local/bin/microsocks /usr/local/bin/microsocks.real
+          printf '#!/bin/sh\nexec /usr/local/bin/microsocks.real -q "$$@"\n' > /usr/local/bin/microsocks
+          chmod 0755 /usr/local/bin/microsocks
+        fi
+        exec /usr/local/bin/fix-dns /entrypoint.sh
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          ip -o link show dev tun0 2>/dev/null | grep -Eq '[<,]UP[,>]' &&
+          ip -4 route get 1.1.1.1 2>/dev/null | grep -q ' dev tun0 ' &&
+          ss -lnt 'sport = :8888' | grep -q LISTEN &&
+          ss -lnt 'sport = :8889' | grep -q LISTEN
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+
+  docker-socket-proxy:
+    extends:
+      file: compose/core.yml
+      service: docker-socket-proxy
+    environment:
+      RESTART_TARGETS: ${VPN_CONTAINER_NAME:-ddns-openconnect-proxy}
+
+  ddns-watcher:
+    extends:
+      file: compose/core.yml
+      service: ddns-watcher
+    depends_on:
+      openconnect:
+        condition: service_started
+      docker-socket-proxy:
+        condition: service_healthy
+    volumes:
+      - ${VPN_CONFIG_DIR:-./config/openconnect}:/source:ro
+    environment:
+      <<: *helper-environment
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+
+networks:
+  docker-api:
+    internal: true
+
+volumes:
+  vpn-state:
