@@ -71,6 +71,12 @@ layout. They do not migrate by merging this PR or pulling this repository;
 standard main-to-head state compatibility does not apply to that layout.
 See [operations](docs/operations.md#upgrade-from-the-single-file-helper).
 
+**Known startup limitation:** the existing health-gated graph is retained for
+safety. If DDNS changes after init but before initial VPN health, the watcher
+can remain blocked behind vproxy health. This pre-existing cold-start recovery
+case is deferred; correct the endpoint externally before completing startup.
+Normal polling/recovery applies once the watcher is running.
+
 ## 五分鐘部署
 
 ### 1. 準備環境

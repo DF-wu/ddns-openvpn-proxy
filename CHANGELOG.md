@@ -13,9 +13,13 @@
   `DDNS_HOSTNAME` remains authoritative. Invalid edits fail before rendering,
   restarting or committing IP/fingerprint state, including missing OpenVPN
   references whose pipeline failure must propagate out of the watch loop.
-- Remove the transitive Gluetun health gate from vproxy startup so the watcher
-  can start DDNS recovery before the VPN is healthy; add an actual Compose
-  startup contract with isolated failing-health fixtures.
+- Restore main's established health-gated Compose startup graph. vproxy waits
+  for healthy Gluetun; the watcher waits for healthy vproxy. This prevents the
+  pre-firewall SOCKS exposure introduced by starting the sidecar too early.
+  Add a real pinned-image negative egress test with an ungated positive control.
+- Explicitly defer the pre-existing stale-endpoint cold-start recovery gap.
+  A watcher that restarts the VPN during concurrent Compose startup can break
+  `up --wait`; this PR does not introduce that startup lifecycle change.
 - Preserve the last good OpenVPN/WireGuard runtime profile when the render
   producer fails; init and watch do not commit state or restart after failure.
 - Restore Gluetun's omitted legacy sidecar default; other backends keep an
@@ -92,9 +96,8 @@
   `VPN_HEALTH_TIMEOUT_SECONDS` 為 canonical 名稱；`GLUETUN_CONTAINER_NAME`、
   `GLUETUN_RESTART_TIMEOUT_SECONDS`、`GLUETUN_HEALTH_TIMEOUT_SECONDS`、
   `OPENVPN_CONFIG_DIR`、`OPENVPN_CONFIG_FILE` 仍接受為 alias。
-- `ddns-watcher` 對 `vproxy` 的 depends_on 由 `service_healthy` 改為
-  `service_started`：VPN 開機時無法連線（例如停機期間 DDNS 已改變）也能讓 watcher
-  啟動並在下一輪修正 IP。
+- Preserve main's health-gated proxy/watcher startup dependencies. Stale-endpoint
+  recovery before initial VPN health remains a documented pre-existing limit.
 - `scripts/validate-compose.sh` 依 `VPN_TYPE` 選擇 stack file 驗證，並檢查
   `COMPOSE_FILE` 與 `VPN_TYPE` 一致。
 - `make logs` 改為追蹤所有 service；`make test` 改呼叫 `tests/run.sh` 總入口。

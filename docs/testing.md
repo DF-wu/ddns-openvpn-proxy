@@ -6,7 +6,8 @@
 make check
 ```
 
-需要 Docker daemon、Docker Compose、`jq`、`curl` 與網路連線。依序執行：
+The full checks require Docker, Compose, `jq`, `curl`, Python 3 (standard library
+only) and network access for pulling images. They run the following components:
 
 1. Markdown lint（`README.md`、`CHANGELOG.md`、`docs/**`）；
 2. rendered Compose 契約驗證（`scripts/validate-compose.sh`，依 `.env` 或
@@ -102,13 +103,27 @@ make test-container
 `tests/container-contract.sh` 建立隔離的暫時 Compose project（`ddns-contract-<pid>`），
 不碰 operator 的 `.env` 與 state，trap 清除所有 container、network 與 volume：
 
-### Startup recovery dependency graph
+### Startup safety and known cold-start limitation
 
-`tests/startup-dependencies.sh` runs the default stack's rendered dependency graph
-with isolated Alpine stand-ins, no host ports, Docker socket or TUN device, and
-no network access. VPN health requires a marker written by the watcher. Compose
-must start the watcher and become ready; a transitive VPN health gate fails the
-test. The container suite runs this contract before backend runtime checks.
+The container suite runs two startup contracts before backend runtime checks:
+
+- `tests/startup-dependencies.sh`: actual default Compose dependency graph with
+  networkless Alpine stand-ins. An unhealthy VPN must gate both proxy and
+  watcher startup (the documented pre-existing cold-recovery limitation).
+  Simulating an external endpoint correction must allow a normal healthy
+  `up --wait` to complete, with proxy then watcher admitted by their health gates.
+- `tests/startup-egress.py`: pinned Gluetun/vproxy images on an owned internal
+  network with a local HTTP target. A startup barrier widens the pre-firewall
+  scheduling window reproduced with CPU throttling. Actual Compose must keep
+  vproxy unstarted; a separate deliberately ungated control must forward the
+  target response, proving the negative egress check can detect the leak.
+  After the native Gluetun entrypoint is released, vproxy remains gated while
+  the VPN is unhealthy. No host ports or real VPN gateway are used.
+
+Resources use unique disposable names and are removed on exit. These contracts
+cover Compose startup, not every daemon restart or scheduling interleaving.
+The helper's established readiness/failure/retry behavior is covered separately
+by its 73-case suite and the Gluetun restart-only API contract.
 
 ### Gluetun backend
 

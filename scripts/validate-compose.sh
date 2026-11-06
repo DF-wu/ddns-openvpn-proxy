@@ -202,10 +202,10 @@ fi
 # --- Backend contracts -------------------------------------------------------
 
 validate_gluetun() {
-  assert_jq '.services.vproxy.depends_on.gluetun.condition == "service_started" and
+  assert_jq '.services.vproxy.depends_on.gluetun.condition == "service_healthy" and
              .services."ddns-watcher".depends_on.gluetun.condition == "service_started" and
-             .services."ddns-watcher".depends_on.vproxy.condition == "service_started"' \
-    'VPN health must not directly or transitively block watcher startup and DDNS recovery'
+             .services."ddns-watcher".depends_on.vproxy.condition == "service_healthy"' \
+    'retain the established health-gated proxy/watcher startup graph; stale-endpoint cold recovery is deferred'
   assert_jq '.services."ddns-init".restart == "no" and
              all([.services.gluetun, .services.vproxy, .services."ddns-watcher",
                   .services."docker-socket-proxy"][]; .restart == "unless-stopped")' \

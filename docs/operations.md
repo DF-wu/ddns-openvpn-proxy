@@ -316,9 +316,18 @@ unchanged.
 
 ## Host reboot
 
-long-running services 使用 `restart: unless-stopped`。`vpn-state` 保留最後
-profile；watcher 啟動後重新解析 DNS 與 fingerprint。停機期間 DDNS 已改變時，最多
-一個 polling interval 內 render 並執行 restart chain。
+The existing `restart: unless-stopped` policy and persisted `vpn-state` are
+unchanged. Once the watcher is running, it polls DNS and the profile fingerprint.
+
+For fresh/recreated Compose startup, vproxy waits for healthy Gluetun and the
+watcher waits for healthy vproxy. If DDNS changes after init renders the endpoint
+but before VPN health, startup can remain blocked. This pre-existing cold-start
+recovery limitation is deferred. Correct/reinitialize the endpoint externally
+under an appropriate maintenance window before completing startup; do not assume
+that the watcher can repair an endpoint while its own startup is health-gated.
+Do not remove the proxy health gate: early SOCKS forwarding can precede firewall
+setup. An independent watcher restarting the VPN during Compose startup also
+introduces a race in which `up --wait` observes the dependency exit.
 
 ## 停止與移除
 

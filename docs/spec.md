@@ -421,11 +421,20 @@ service_healthy` 不變慢。Gluetun image 內建 5s healthcheck 的 `test` 保�
 節奏。`docker-socket-proxy` 以單一 HAProxy process（無 master-worker）、
 `nbthread 1`、`maxconn 32` 執行。
 
-Watcher startup must not wait directly or transitively for VPN health. In the
-Gluetun stack, watcher → Gluetun, watcher → vproxy and vproxy → Gluetun use
-`service_started`; only the Docker API proxy requires `service_healthy` for
-watcher startup. Runtime readiness still gates IP/fingerprint commits. Init is
-one-shot (`restart: "no"`); long-running services retain `unless-stopped`.
+Preserve the established Compose startup graph: vproxy requires Gluetun
+`service_healthy`; the watcher requires vproxy `service_healthy`, Gluetun
+`service_started` and Docker API proxy `service_healthy`. A proxy listener alone
+must not substitute for the Gluetun VPN/firewall readiness gate.
+
+Cold-start stale-endpoint recovery remains a **known pre-existing limitation**:
+if DDNS changes after init but before VPN health, the watcher can remain blocked
+by these gates. This PR does not fix that case. An independent watcher can race
+Compose startup with a VPN restart and cause `up --wait` to fail; that lifecycle
+change is deferred. Correct the endpoint externally before completing startup.
+
+For an already running watcher, VPN readiness still precedes sidecar restart,
+and both readiness checks gate state commits. Init remains one-shot
+(`restart: "no"`); long-running services retain `unless-stopped`.
 
 ## 11. Health model
 

@@ -129,19 +129,29 @@ restart VPN container → wait VPN_HEALTH_PROBE
 | openconnect | `tcp://openconnect:8888` | 上游 tunnel gate 在 `tun0` UP 前以 RST 拒絕 proxy 連線 |
 | singbox | Clash API `/proxies/vpn/delay?url=…` | 實際經 `vpn` outbound 抓 URL，證明資料路徑 |
 
-### Watcher startup must not wait for VPN health
+### Safe startup and deferred cold-start recovery
 
-The old dependency chain was watcher → vproxy started → Gluetun healthy.
-Changing only the watcher's direct vproxy dependency does not remove that
-transitive gate. If a stale endpoint prevents VPN health, DDNS recovery cannot
-start. Both watcher → vproxy and vproxy → Gluetun therefore use
-`service_started`; watcher → Gluetun also uses `service_started`. Gluetun still
-waits for successful `ddns-init`, and the watcher waits for a healthy socket
-proxy. Runtime VPN and sidecar readiness checks still gate state commits.
+Preserve main's established Compose graph: vproxy waits for Gluetun
+`service_healthy`; the watcher waits for vproxy `service_healthy`, Gluetun
+`service_started`, and a healthy Docker API proxy. The SOCKS listener therefore
+does not start merely because the VPN container process exists. A proxy socket
+or its own Docker healthcheck cannot block forwarding after it starts.
 
-`tests/startup-dependencies.sh` runs this actual rendered dependency graph with
-isolated Alpine fixtures: the VPN remains unhealthy until the watcher starts.
-This fails with the transitive health gate and passes when recovery can start.
+**Known pre-existing limitation:** if DDNS changes after init renders the
+endpoint but before the VPN becomes healthy, these startup gates can prevent
+the watcher from starting to repair it. Cold-start recovery is deferred; correct
+the endpoint externally before completing startup. This PR does not claim to
+repair that case. Allowing recovery to restart Gluetun during concurrent Compose
+startup can make `up --wait` fail while observing the VPN dependency exit.
+
+Once the stack is healthy and the watcher is running, its established sequence
+remains render → VPN restart → VPN readiness → sidecar restart/readiness → state
+commit. Failed steps preserve committed state for a full retry.
+
+`tests/startup-dependencies.sh` checks both the known unhealthy-start block and
+normal healthy startup. `tests/startup-egress.py` uses pinned native runtime
+images, an isolated target and an ungated positive control to detect forwarding
+before firewall initialization. No real VPN server is used.
 
 ### Network namespace lifecycle（gluetun backend）
 

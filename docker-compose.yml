@@ -101,9 +101,8 @@ services:
     restart: unless-stopped
     depends_on:
       gluetun:
-        # Watcher startup depends on this sidecar. Requiring VPN health here
-        # would block the watcher from repairing an unreachable DDNS endpoint.
-        condition: service_started
+        # Do not expose SOCKS before Gluetun has installed its firewall/VPN.
+        condition: service_healthy
     read_only: true
     cap_drop:
       - ALL
@@ -162,7 +161,7 @@ services:
       gluetun:
         condition: service_started
       vproxy:
-        condition: service_started
+        condition: service_healthy
       docker-socket-proxy:
         condition: service_healthy
     volumes:

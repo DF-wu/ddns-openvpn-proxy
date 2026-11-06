@@ -10,6 +10,7 @@ set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 sh "$repo_root/tests/startup-dependencies.sh"
+python3 "$repo_root/tests/startup-egress.py"
 suffix=$$
 project=ddns-contract-$suffix
 source_dir=$(mktemp -d)

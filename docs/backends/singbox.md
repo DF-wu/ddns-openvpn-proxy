@@ -18,6 +18,9 @@ future work and is not production validated.
   and value across lines can cause rejection or missed fields. Claims about
   formatted/minified JSON below apply only to the tested layouts, not arbitrary
   valid JSON.
+- Certificate-reference validation can report an unreadable `certificate_path`
+  yet return success when the later `key_path` iteration is empty. This remains
+  a [deferred experimental-backend P2](https://github.com/DF-wu/ddns-openvpn-proxy/pull/3#discussion_r4492673300).
 - These defects remain open for future work. Existing fixture tests and a local
   Shadowsocks contract do not establish general JSON parsing correctness.
 
