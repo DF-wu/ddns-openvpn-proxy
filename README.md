@@ -19,8 +19,13 @@ switch、健康檢查、HTTP 與 SOCKS5 proxy 都交給 version-pinned 的上游
 | --- | --- | --- | --- | --- |
 | `openvpn` | Gluetun（`docker-compose.yml`，預設） | OpenVPN custom profile | HTTP＋SOCKS5 | Stable |
 | `wireguard` | Gluetun（`docker-compose.yml`） | WireGuard single-peer | HTTP＋SOCKS5 | Stable |
-| `openconnect` | OpenConnect（`docker-compose.openconnect.yml`） | AnyConnect／ocserv、GlobalProtect、Pulse、F5、Fortinet、Array | 無（loopback-only） | Beta |
-| `singbox` | sing-box（`docker-compose.singbox.yml`） | Shadowsocks、VMess、VLESS、Trojan、Hysteria2、TUIC、ShadowTLS、AnyTLS、SSH | HTTP＋SOCKS5 | Beta |
+| `openconnect` | OpenConnect（`docker-compose.openconnect.yml`） | AnyConnect／ocserv、GlobalProtect、Pulse、F5、Fortinet、Array | 無（loopback-only） | Developing / experimental |
+| `singbox` | sing-box（`docker-compose.singbox.yml`） | Shadowsocks、VMess、VLESS、Trojan、Hysteria2、TUIC、ShadowTLS、AnyTLS、SSH | HTTP＋SOCKS5 | Developing / experimental |
+
+OpenConnect and sing-box are **Developing / experimental**, retained for future
+work and not production validated. Real gateway connectivity, authentication and
+recovery remain unverified. sing-box also has known unresolved hostname-regex and
+multiline-JSON parsing P2 defects; see its [limitations](docs/backends/singbox.md#known-unresolved-p2-limitations).
 
 所有 backend 共用同一套 DDNS 解析、原子寫入、restart chain、restart-only Docker
 API 與 container hardening。每個 backend 的細節：
@@ -47,6 +52,24 @@ IKEv2／L2TP／SSTP 不在目前契約內（原因見 [spec §1.4、§13.1](docs
   `no-new-privileges`、read-only root；只有 Gluetun／OpenConnect 有 `NET_ADMIN`。
 - **協定可擴充**：新增一種 VPN 連線方式＝一個 adapter 檔＋一個 stack file，流程在
   [spec §13](docs/spec.md)。
+
+## Upgrade compatibility
+
+For the standard main OpenVPN/WireGuard layout, keep the same source paths,
+Compose project name and `vpn-state` volume. Unchanged profiles retain their
+rendered bytes, selected IP and fingerprint without a helper-triggered restart.
+This does not promise zero deployment downtime: `make restart` recreates services.
+
+Ship the complete `scripts/` tree (including `lib/` and `adapters/`),
+`compose/core.yml`, and `docker/` configuration with the selected Compose stack.
+The old `scripts/ddns-openvpn.sh` is a command alias requiring that tree; copying
+or mounting that one file alone fails. Update custom entrypoints, healthchecks
+and mounts to `/opt/ddns/ddns-vpn.sh` and the full `/opt/ddns` directory.
+
+Frozen `compat/watcher/` deployments use a separate image, recipe and state
+layout. They do not migrate by merging this PR or pulling this repository;
+standard main-to-head state compatibility does not apply to that layout.
+See [operations](docs/operations.md#upgrade-from-the-single-file-helper).
 
 ## 五分鐘部署
 

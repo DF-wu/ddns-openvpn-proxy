@@ -527,6 +527,213 @@ assert_equals '198.51.100.10' "$(cat "$fixture/state/ddns/last-ip")" \
 [ ! -e "$fixture/docker.log" ] || fail 'WireGuard DNS failure must not restart Gluetun'
 pass 'WireGuard transient DNS failure preserves the active tunnel'
 
+# Exercise two polls of one watcher process; sleep edits the source between
+# polls, then terminates the watcher after the second poll without wall-clock waits.
+prepare_watch_edit() {
+  cat > "$fixture/bin/getent" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$2" >> "$STATE_DIR/resolved-hosts"
+case $2 in
+  vpn.example.test) printf '198.51.100.10 STREAM %s\n' "$2" ;;
+  new.example.test) printf '198.51.100.20 STREAM %s\n' "$2" ;;
+  override.example.test) printf '198.51.100.30 STREAM %s\n' "$2" ;;
+  *) exit 1 ;;
+esac
+EOF
+  cat > "$fixture/bin/sleep" <<'EOF'
+#!/bin/sh
+if [ ! -f "$STATE_DIR/first-poll" ]; then
+  touch "$STATE_DIR/first-poll"
+  cp "$VPN_RENDERED_CONFIG" "$STATE_DIR/before.conf"
+  cp "$STATE_DIR/ddns/last-ip" "$STATE_DIR/before.ip"
+  cp "$STATE_DIR/ddns/source.sha256" "$STATE_DIR/before.hash"
+  case $WATCH_EDIT in
+    hostname) sed -i 's/vpn.example.test/new.example.test/g' "$VPN_SOURCE_CONFIG" ;;
+    invalid)
+      case $VPN_TYPE in
+        openvpn) printf 'remote backup.example.test 1194 udp\n' >> "$VPN_SOURCE_CONFIG" ;;
+        wireguard) sed -i '/^PrivateKey[[:space:]]*=/d' "$VPN_SOURCE_CONFIG" ;;
+      esac
+      ;;
+    missing-reference) rm "$(dirname "$VPN_SOURCE_CONFIG")/ca.crt" ;;
+  esac
+else
+  kill -TERM "$PPID"
+fi
+EOF
+  chmod +x "$fixture/bin/getent" "$fixture/bin/sleep"
+}
+
+for protocol in openvpn wireguard; do
+  case $protocol in
+    openvpn) fixture=$(new_fixture watch_endpoint) ;;
+    wireguard) fixture=$(new_wireguard_fixture watch_endpoint_wg) ;;
+  esac
+  prepare_watch_edit
+  VPN_TYPE=$protocol DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+  VPN_TYPE=$protocol WATCH_EDIT=hostname run_subject "$fixture" watch > "$fixture/watch.log" 2>&1
+  assert_equals 'vpn.example.test
+new.example.test' "$(cat "$fixture/state/resolved-hosts")" 'watch rediscovers endpoint each poll'
+  assert_contains '198.51.100.20' "$fixture/state/runtime/vpn.conf"
+  assert_equals '198.51.100.20' "$(cat "$fixture/state/ddns/last-ip")" 'new endpoint address is committed'
+  assert_equals 'container restart --timeout 5 -- vpn-test
+container restart --timeout 5 -- vproxy-test' "$(cat "$fixture/docker.log")" 'only the changed poll restarts the stack'
+  hash_after=$(cat "$fixture/state/ddns/source.sha256")
+  [ "$hash_after" != "$(cat "$fixture/state/before.hash")" ] || fail 'edited profile fingerprint must be committed'
+  VPN_TYPE=$protocol DDNS_OVERRIDE_IPS=198.51.100.20 run_subject "$fixture" watch-once >/dev/null
+  assert_equals '2' "$(wc -l < "$fixture/docker.log" | tr -d ' ')" 'committed profile must not restart again'
+  pass "$protocol watch refreshes the endpoint between actual iterations"
+
+  case $protocol in
+    openvpn) fixture=$(new_fixture watch_override) ;;
+    wireguard) fixture=$(new_wireguard_fixture watch_override_wg) ;;
+  esac
+  prepare_watch_edit
+  VPN_TYPE=$protocol DDNS_HOSTNAME=override.example.test DDNS_OVERRIDE_IPS=198.51.100.30 \
+    run_subject "$fixture" init >/dev/null
+  VPN_TYPE=$protocol DDNS_HOSTNAME=override.example.test WATCH_EDIT=hostname \
+    run_subject "$fixture" watch > "$fixture/watch.log" 2>&1
+  assert_equals 'override.example.test
+override.example.test' "$(cat "$fixture/state/resolved-hosts")" 'explicit hostname stays authoritative'
+  assert_contains '198.51.100.30' "$fixture/state/runtime/vpn.conf"
+  assert_equals '198.51.100.30' "$(cat "$fixture/state/ddns/last-ip")" 'explicit hostname IP is retained'
+  assert_equals '2' "$(wc -l < "$fixture/docker.log" | tr -d ' ')" 'profile edit still triggers one restart chain'
+  pass "$protocol watch preserves explicit DDNS_HOSTNAME across endpoint edits"
+
+  for edit in invalid missing-reference; do
+    [ "$protocol:$edit" != wireguard:missing-reference ] || continue
+    case $protocol in
+      openvpn) fixture=$(new_fixture "watch_${protocol}_$edit") ;;
+      wireguard) fixture=$(new_wireguard_fixture "watch_${protocol}_$edit") ;;
+    esac
+    prepare_watch_edit
+    VPN_TYPE=$protocol DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+    status=0
+    VPN_TYPE=$protocol WATCH_EDIT=$edit run_subject "$fixture" watch > "$fixture/watch.log" 2>&1 || status=$?
+    assert_equals '64' "$status" 'invalid edit exits with configuration error'
+    assert_equals 'vpn.example.test' "$(cat "$fixture/state/resolved-hosts")" 'invalid edit prevents a second resolution'
+    cmp "$fixture/state/before.conf" "$fixture/state/runtime/vpn.conf" || fail 'invalid edit rendered a profile'
+    cmp "$fixture/state/before.ip" "$fixture/state/ddns/last-ip" || fail 'invalid edit committed IP'
+    cmp "$fixture/state/before.hash" "$fixture/state/ddns/source.sha256" || fail 'invalid edit committed fingerprint'
+    [ ! -e "$fixture/docker.log" ] || fail 'invalid edit restarted the stack'
+    pass "$protocol watch rejects $edit edits before render, restart or state commit"
+  done
+done
+
+# A failure at any restart/readiness stage must preserve both committed state
+# files, then retry the entire chain and stop restarting after a successful commit.
+for protocol in openvpn wireguard; do
+  for failure in vpn-restart vpn-readiness sidecar-restart sidecar-readiness; do
+    case $protocol in
+      openvpn) fixture=$(new_fixture "retry_${protocol}_$failure"); profile=client.ovpn ;;
+      wireguard) fixture=$(new_wireguard_fixture "retry_${protocol}_$failure"); profile=wg0.conf ;;
+    esac
+    VPN_TYPE=$protocol DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+    cp "$fixture/state/ddns/last-ip" "$fixture/before.ip"
+    cp "$fixture/state/ddns/source.sha256" "$fixture/before.hash"
+    printf '\n# profile rotation\n' >> "$fixture/source/$profile"
+    status=0
+    case $failure in
+      vpn-restart)
+        VPN_TYPE=$protocol DOCKER_FAIL_CONTAINER=vpn-test DDNS_OVERRIDE_IPS=198.51.100.20 \
+          run_subject "$fixture" watch-once >/dev/null 2>&1 || status=$?
+        ;;
+      vpn-readiness)
+        VPN_TYPE=$protocol WGET_SHOULD_FAIL=1 VPN_HEALTH_TIMEOUT_SECONDS=1 DDNS_OVERRIDE_IPS=198.51.100.20 \
+          run_subject "$fixture" watch-once >/dev/null 2>&1 || status=$?
+        ;;
+      sidecar-restart)
+        VPN_TYPE=$protocol DOCKER_FAIL_CONTAINER=vproxy-test DDNS_OVERRIDE_IPS=198.51.100.20 \
+          run_subject "$fixture" watch-once >/dev/null 2>&1 || status=$?
+        ;;
+      sidecar-readiness)
+        VPN_TYPE=$protocol NC_SHOULD_FAIL=1 VPN_HEALTH_TIMEOUT_SECONDS=1 DDNS_OVERRIDE_IPS=198.51.100.20 \
+          run_subject "$fixture" watch-once >/dev/null 2>&1 || status=$?
+        ;;
+    esac
+    assert_equals '1' "$status" 'failed chain returns runtime failure'
+    cmp "$fixture/before.ip" "$fixture/state/ddns/last-ip" || fail 'failed chain committed IP'
+    cmp "$fixture/before.hash" "$fixture/state/ddns/source.sha256" || fail 'failed chain committed fingerprint'
+    : > "$fixture/docker.log"
+    VPN_TYPE=$protocol DDNS_OVERRIDE_IPS=198.51.100.20 run_subject "$fixture" watch-once >/dev/null
+    assert_equals 'container restart --timeout 5 -- vpn-test
+container restart --timeout 5 -- vproxy-test' "$(cat "$fixture/docker.log")" 'retry must restart the entire chain'
+    assert_equals '198.51.100.20' "$(cat "$fixture/state/ddns/last-ip")" 'successful retry commits IP'
+    [ "$(cat "$fixture/before.hash")" != "$(cat "$fixture/state/ddns/source.sha256")" ] ||
+      fail 'successful retry must commit changed fingerprint'
+    VPN_TYPE=$protocol DDNS_OVERRIDE_IPS=198.51.100.20 run_subject "$fixture" watch-once >/dev/null
+    assert_equals '2' "$(wc -l < "$fixture/docker.log" | tr -d ' ')" 'successful retry must not restart again'
+    pass "$protocol $failure preserves IP/fingerprint and retries the complete chain"
+  done
+done
+
+for protocol in openvpn wireguard; do
+  case $protocol in
+    openvpn) fixture=$(new_fixture legacy_sidecar_defaults); profile=client.ovpn ;;
+    wireguard) fixture=$(new_wireguard_fixture legacy_sidecar_defaults_wg); profile=wg0.conf ;;
+  esac
+  # Deliberately bypass run_subject, which supplies canonical Compose settings.
+  env -u SIDECAR_CONTAINER_NAME -u VPROXY_CONTAINER_NAME \
+    PATH="$fixture/bin:$PATH" STATE_DIR="$fixture/state" VPN_TYPE="$protocol" \
+    OPENVPN_SOURCE_CONFIG="$fixture/source/$profile" \
+    OPENVPN_RENDERED_CONFIG="$fixture/state/runtime/vpn.conf" \
+    DDNS_OVERRIDE_IPS=198.51.100.10 sh "$legacy_subject" init >/dev/null
+  env -u SIDECAR_CONTAINER_NAME -u VPROXY_CONTAINER_NAME \
+    PATH="$fixture/bin:$PATH" STATE_DIR="$fixture/state" VPN_TYPE="$protocol" \
+    OPENVPN_SOURCE_CONFIG="$fixture/source/$profile" \
+    OPENVPN_RENDERED_CONFIG="$fixture/state/runtime/vpn.conf" \
+    DOCKER_LOG="$fixture/docker.log" WGET_LOG="$fixture/wget.log" NC_LOG="$fixture/nc.log" \
+    DDNS_OVERRIDE_IPS=198.51.100.20 sh "$legacy_subject" watch-once >/dev/null
+  assert_equals 'container restart --timeout 20 -- ddns-openvpn-proxy
+container restart --timeout 20 -- ddns-openvpn-vproxy' "$(cat "$fixture/docker.log")" 'legacy default restart targets'
+  pass "$protocol legacy shim retains omitted Gluetun and sidecar defaults"
+done
+
+for protocol in openvpn wireguard; do
+  for operation in init init-empty watch-once watch; do
+    case $protocol in
+      openvpn) fixture=$(new_fixture "render_failure_${protocol}_$operation") ;;
+      wireguard) fixture=$(new_wireguard_fixture "render_failure_${protocol}_$operation") ;;
+    esac
+    VPN_TYPE=$protocol DDNS_OVERRIDE_IPS=198.51.100.10 run_subject "$fixture" init >/dev/null
+    cp "$fixture/state/runtime/vpn.conf" "$fixture/before.conf"
+    cp "$fixture/state/ddns/last-ip" "$fixture/before.ip"
+    cp "$fixture/state/ddns/source.sha256" "$fixture/before.hash"
+    cat > "$fixture/bin/getent" <<'EOF'
+#!/bin/sh
+rm -f "$VPN_SOURCE_CONFIG"
+printf '198.51.100.20 STREAM vpn.example.test\n'
+EOF
+    # watch retries runtime failures; stop after the failed iteration so its
+    # lack of side effects can be inspected without a real polling delay.
+    cat > "$fixture/bin/sleep" <<'EOF'
+#!/bin/sh
+kill -TERM "$PPID"
+EOF
+    chmod +x "$fixture/bin/getent" "$fixture/bin/sleep"
+    command=$operation
+    if [ "$operation" = init-empty ]; then
+      command=init
+      rm "$fixture/state/ddns/last-ip" "$fixture/state/ddns/source.sha256"
+    fi
+    status=0
+    VPN_TYPE=$protocol run_subject "$fixture" "$command" > "$fixture/render.log" 2>&1 || status=$?
+    if [ "$operation" != watch ]; then
+      [ "$status" -ne 0 ] || fail 'source disappearance must fail rendering'
+    fi
+    cmp "$fixture/before.conf" "$fixture/state/runtime/vpn.conf" || fail 'render failure replaced a good runtime profile'
+    if [ "$operation" = init-empty ]; then
+      [ ! -e "$fixture/state/ddns/last-ip" ] || fail 'render failure seeded IP state'
+      [ ! -e "$fixture/state/ddns/source.sha256" ] || fail 'render failure seeded fingerprint state'
+    else
+      cmp "$fixture/before.ip" "$fixture/state/ddns/last-ip" || fail 'render failure committed IP'
+      cmp "$fixture/before.hash" "$fixture/state/ddns/source.sha256" || fail 'render failure committed fingerprint'
+    fi
+    [ ! -e "$fixture/docker.log" ] || fail 'render failure restarted the stack'
+    pass "$protocol $operation preserves runtime/IP/fingerprint when the render producer fails"
+  done
+done
+
 # --- OpenConnect --------------------------------------------------------------
 
 fixture=$(new_openconnect_fixture openconnect_validate)

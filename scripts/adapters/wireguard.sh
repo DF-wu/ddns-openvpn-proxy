@@ -105,7 +105,8 @@ adapter_fingerprint() {
 adapter_render() {
   resolved_ip=$1
 
-  awk -v ip="$resolved_ip" '
+  # shellcheck disable=SC2016 # The producer arguments include an awk program.
+  install_rendered "$rendered_config" awk -v ip="$resolved_ip" '
     /^[[:space:]]*\[/ {
       section = $0
       sub(/^[[:space:]]+/, "", section)
@@ -132,5 +133,5 @@ adapter_render() {
     }
 
     { print }
-  ' "$source_config" | install_rendered "$rendered_config"
+  ' "$source_config"
 }

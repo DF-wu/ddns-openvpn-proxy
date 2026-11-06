@@ -101,7 +101,9 @@ services:
     restart: unless-stopped
     depends_on:
       gluetun:
-        condition: service_healthy
+        # Watcher startup depends on this sidecar. Requiring VPN health here
+        # would block the watcher from repairing an unreachable DDNS endpoint.
+        condition: service_started
     read_only: true
     cap_drop:
       - ALL

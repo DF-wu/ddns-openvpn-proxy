@@ -291,8 +291,28 @@ docker compose restart vproxy
 2. `make check`。
 3. `docker compose pull && docker compose up -d --force-recreate --wait --wait-timeout 180`。
 
-Rollback 把 tag 改回已知正常版本後重做第 3 步；`vpn-state` 與 source profile
-向後相容，不需要 migration。不要使用 `docker compose up --build`。
+For an image-only rollback, restore the known good image tag and repeat step 3.
+A helper/recipe rollback must restore the matching Compose files and script
+layout. Standard OpenVPN/WireGuard state compatibility requires identical source
+paths, project name and volume; it does not cover the frozen compat layout.
+
+### Upgrade from the single-file helper
+
+Ship the complete `scripts/` tree (including `lib/` and `adapters/`),
+`compose/core.yml`, and `docker/` files with the selected stack. The deprecated
+`ddns-openvpn.sh` alias requires `ddns-vpn.sh` and its libraries beside it; a
+single-file copy or bind mount fails. Update custom entrypoints and healthchecks
+to `/opt/ddns/ddns-vpn.sh`, and mount all of `scripts/` at `/opt/ddns:ro`.
+
+Keep the same source paths, Compose project name and `vpn-state` volume for the
+standard main OpenVPN/WireGuard upgrade. Unchanged input preserves rendered
+bytes, IP and fingerprint without an extra helper restart. `make restart` still
+force-recreates services and causes downtime; schedule deployment separately.
+
+Frozen `compat/watcher/` image deployments keep their existing recipe and state
+layout. No migration is automatic, and adopting the standard stack needs a
+separate recipe/state review. The frozen watcher and publishing workflow are
+unchanged.
 
 ## Host reboot
 

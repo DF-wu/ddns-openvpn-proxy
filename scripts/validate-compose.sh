@@ -202,6 +202,14 @@ fi
 # --- Backend contracts -------------------------------------------------------
 
 validate_gluetun() {
+  assert_jq '.services.vproxy.depends_on.gluetun.condition == "service_started" and
+             .services."ddns-watcher".depends_on.gluetun.condition == "service_started" and
+             .services."ddns-watcher".depends_on.vproxy.condition == "service_started"' \
+    'VPN health must not directly or transitively block watcher startup and DDNS recovery'
+  assert_jq '.services."ddns-init".restart == "no" and
+             all([.services.gluetun, .services.vproxy, .services."ddns-watcher",
+                  .services."docker-socket-proxy"][]; .restart == "unless-stopped")' \
+    'init must remain one-shot and the Gluetun stack must retain its restart policy'
   assert_jq '.services.gluetun.cap_add == ["NET_ADMIN"] and
              any(.services.gluetun.devices[]; (if type == "string" then . else .source end) == "/dev/net/tun")' \
     'Gluetun is the only service with NET_ADMIN and the TUN device'

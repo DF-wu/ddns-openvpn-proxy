@@ -26,7 +26,7 @@ sh tests/helper.sh
 
 POSIX sh TAP-style suite，不需要 VPN server 或 Docker daemon；`docker`、`getent`、
 `nslookup`、`wget`、`nc` 以記錄參數的 fake 取代，因此可精確斷言 restart 順序與
-state commit 時機。48 個案例涵蓋：
+state commit 時機。73 cases cover the following contracts:
 
 | 群組 | 證明內容 |
 | --- | --- |
@@ -36,11 +36,27 @@ state commit 時機。48 個案例涵蓋：
 | OpenConnect | 通過；render 附加 `resolve=`／`non-inter`、`cafile` 絕對路徑、`vpn.env`；address-change 只 restart VPN container 並以 `tcp://openconnect:8888` 探測；CA 輪替 restart；缺 `OPENCONNECT_SERVER`、IPv4 server、port 不合法、stack 管理選項、未知 protocol、缺 cafile、partial credentials、非 loopback bind 都拒絕 |
 | sing-box | 通過；只改寫 `"server"`（含 minified JSON）、`certificate_path` 絕對路徑；address-change 以 Clash API 探測；憑證輪替 restart；含 `inbounds`、缺 `vpn` tag、多個 hostname server 未指定 `DDNS_HOSTNAME`、`DDNS_HOSTNAME` 不在 profile 都拒絕；DNS 失敗保留；public bind 認證政策 |
 
+The OpenVPN/WireGuard regressions run two polls of the same `watch` process,
+edit its source during a fake polling sleep, and assert the DNS target, rendered
+IP, fingerprint commit and restart count. They cover automatic endpoint refresh,
+explicit `DDNS_HOSTNAME`, invalid profile edits and a missing OpenVPN reference.
+Legacy shim cases omit both sidecar names and assert the original default
+restart targets. Render failure cases delete the source after validation during
+DNS resolution, covering both protocols in init (with and without prior state),
+watch-once and the actual watch loop; good runtime bytes and state are preserved.
+Failure/retry cases cover VPN restart, VPN readiness, sidecar restart and sidecar
+readiness: both committed state files stay unchanged on failure, the entire
+chain retries, and successful state prevents a redundant restart.
+
+OpenConnect and sing-box remain **Developing / experimental**. Existing tests
+cover selected fixtures; they do not verify real gateway authentication/recovery
+or resolve sing-box's regex overmatch and multiline-JSON P2 limitations.
+
 ## Compose 契約
 
 ```bash
 make validate-compose            # 目前 .env（或 .env.example）
-sh tests/compose-validation.sh   # 22 個跨 backend 案例
+sh tests/compose-validation.sh   # 24 cases across backend models
 ```
 
 `scripts/validate-compose.sh` 用 `docker compose config --format json` 檢查
@@ -85,6 +101,14 @@ make test-container
 
 `tests/container-contract.sh` 建立隔離的暫時 Compose project（`ddns-contract-<pid>`），
 不碰 operator 的 `.env` 與 state，trap 清除所有 container、network 與 volume：
+
+### Startup recovery dependency graph
+
+`tests/startup-dependencies.sh` runs the default stack's rendered dependency graph
+with isolated Alpine stand-ins, no host ports, Docker socket or TUN device, and
+no network access. VPN health requires a marker written by the watcher. Compose
+must start the watcher and become ready; a transitive VPN health gate fails the
+test. The container suite runs this contract before backend runtime checks.
 
 ### Gluetun backend
 

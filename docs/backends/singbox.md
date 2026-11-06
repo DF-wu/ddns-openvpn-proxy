@@ -4,9 +4,22 @@
 支援的所有 outbound：Shadowsocks、VMess、VLESS（含 Reality）、Trojan、Hysteria2、
 TUIC、ShadowTLS、AnyTLS、SSH、HTTP／SOCKS upstream。
 
-成熟度：**Beta**。helper 契約、Compose 契約與**真實資料路徑**（本機 Shadowsocks
-server → mixed inbound → 認證 → outbound）有自動測試；真實 server 的連線需要在
-staging 驗收。
+Maturity: **Developing / experimental**. Existing tests cover selected helper,
+Compose and local Shadowsocks data-path contracts. They do not validate every
+outbound, real gateway connectivity or recovery. This backend is retained for
+future work and is not production validated.
+
+## Known unresolved P2 limitations
+
+- The renderer treats the selected hostname as a regular expression. A hostname
+  such as `vpn.example.com` can also match and rewrite an unrelated server such
+  as `vpn1example2com`; exact hostname matching is not guaranteed.
+- Field extraction is line based. Valid JSON whitespace between a key, colon
+  and value across lines can cause rejection or missed fields. Claims about
+  formatted/minified JSON below apply only to the tested layouts, not arbitrary
+  valid JSON.
+- These defects remain open for future work. Existing fixture tests and a local
+  Shadowsocks contract do not establish general JSON parsing correctness.
 
 ## 上游元件
 
@@ -63,9 +76,9 @@ container 立即退出。
 - profile 裡有多個 hostname 形式的 `"server"`（例如自訂 DNS server）時，必須以
   `DDNS_HOSTNAME` 指定要監看的那一個。
 - `certificate_path`、`key_path` 相對路徑以 profile 目錄為基準。
-- 可以有多個 outbound（例如 `vpn` 是 `selector`／`urltest` 而實際 server 在其他
-  outbound），但被改寫的 `server` 只會是 DDNS hostname 那個；其他 server 若是
-  hostname 需要 `DDNS_HOSTNAME`。
+- Multiple outbounds can be described, including a `vpn` selector/urltest with
+  servers in other outbounds. Multiple hostname servers require `DDNS_HOSTNAME`.
+  Exact matching remains unreliable; see the unresolved regex limitation above.
 
 ## `.env`
 

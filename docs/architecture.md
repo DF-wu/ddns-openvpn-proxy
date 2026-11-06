@@ -129,12 +129,19 @@ restart VPN container → wait VPN_HEALTH_PROBE
 | openconnect | `tcp://openconnect:8888` | 上游 tunnel gate 在 `tun0` UP 前以 RST 拒絕 proxy 連線 |
 | singbox | Clash API `/proxies/vpn/delay?url=…` | 實際經 `vpn` outbound 抓 URL，證明資料路徑 |
 
-### 為什麼 watcher 不再等 vproxy healthy 才啟動
+### Watcher startup must not wait for VPN health
 
-舊版 watcher `depends_on: vproxy: service_healthy`。若開機時 DDNS 已指向舊 IP
-（例如停機期間改變），Gluetun 永遠不健康、vproxy 永遠不健康、watcher 永遠不啟動，
-沒有人會再解析 DNS。改成 `service_started` 後 watcher 的第一輪就能修正 IP；若
-sidecar 還不存在，restart 失敗、不提交、下一輪重試，自我修復。
+The old dependency chain was watcher → vproxy started → Gluetun healthy.
+Changing only the watcher's direct vproxy dependency does not remove that
+transitive gate. If a stale endpoint prevents VPN health, DDNS recovery cannot
+start. Both watcher → vproxy and vproxy → Gluetun therefore use
+`service_started`; watcher → Gluetun also uses `service_started`. Gluetun still
+waits for successful `ddns-init`, and the watcher waits for a healthy socket
+proxy. Runtime VPN and sidecar readiness checks still gate state commits.
+
+`tests/startup-dependencies.sh` runs this actual rendered dependency graph with
+isolated Alpine fixtures: the VPN remains unhealthy until the watcher starts.
+This fails with the transitive health gate and passes when recovery can start.
 
 ### Network namespace lifecycle（gluetun backend）
 
@@ -173,10 +180,12 @@ kill switch，因為沒有 direct outbound、`route.final=vpn`，流量無路可
 inbound／DNS／route，profile 只描述 outbound，這樣 proxy 認證與 leak 政策由 `.env`
 與 validator 統一管理，而不是散落在使用者的 JSON 裡。
 
-Helper 以 awk 對整份 JSON 做 `"server": "HOST"` 的字串替換（不需要 jq，stock
-image 沒有），格式化或 minified 都可；正確性由 container 啟動前的 `sing-box check`
-把關。sing-box 合併多檔時依檔名排序、字母序最前者優先，所以 managed 檔命名
-`00-managed.json`。
+The Developing / experimental sing-box adapter uses line-based awk matching.
+Its hostname regex can rewrite unrelated servers, and valid multiline JSON
+whitespace can be rejected or missed. `sing-box check` does not establish that
+the intended server alone was rewritten. See the explicit unresolved
+[P2 limitations](backends/singbox.md#known-unresolved-p2-limitations). The stack
+uses `00-managed.json` to give managed scalar values priority when merging.
 
 ## Runtime 資料模型
 

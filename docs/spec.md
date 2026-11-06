@@ -191,6 +191,9 @@ version-pinned 的上游 image。本專案不建置任何 image。
 
 ### 5.3 OpenConnect（`openconnect`）
 
+**Developing / experimental**: real gateway authentication and recovery are
+unverified; this section describes intended behavior, not production acceptance.
+
 - 格式：OpenConnect `--config` 檔（每行一個 long option，無前導 `--`；接受
   `key=value`、`key = value`、`key value`、bare flag；`#` 註解）。
 - Gateway 由 `OPENCONNECT_SERVER`／`OPENCONNECT_PORT` 提供（OpenConnect 的 config
@@ -208,7 +211,14 @@ version-pinned 的上游 image。本專案不建置任何 image。
 
 ### 5.4 sing-box（`singbox`）
 
-- 格式：sing-box JSON；格式化或 minified 皆可。
+**Developing / experimental**: this section describes intended behavior. Known
+unresolved P2 defects can rewrite unrelated hostname servers through regex
+matching and reject valid multiline JSON whitespace. Arbitrary JSON formatting
+and exact hostname matching are not guaranteed; see
+[backend limitations](backends/singbox.md#known-unresolved-p2-limitations).
+
+- Intended format: sing-box JSON; only selected pretty/minified layouts are
+  tested, subject to the unresolved parsing limitations above.
 - 必須含 `"outbounds"` 與一個 `"tag": "vpn"` 的 outbound；不得含 `"inbounds"`。
   含 `"dns"` 或 `"route"` 時記錄 WARN（stack 管理的值優先）。
 - Endpoint host：所有 `"server"` 字串值中非 IPv4 者。恰好一個時自動採用；多於一個
@@ -258,6 +268,12 @@ validate ──► resolve ──(fail)──► sleep DDNS_INIT_RETRY_SECONDS �
 
 ### 7.2 watch（`ddns-watcher`，每 `DDNS_POLL_SECONDS`）
 
+Every poll validates the current profile and rediscovers its endpoint before DNS,
+rendering or restarting. `DDNS_HOSTNAME`, when explicitly set, overrides that
+endpoint. Invalid configuration exits 64. For OpenVPN/WireGuard, a failed render
+producer preserves the last good runtime profile; init/watch do not commit
+IP/fingerprint state or restart the stack after that failure.
+
 每輪取得三份證據：目前所有合法 IPv4 A record、已提交的 `last-ip`、目前
 fingerprint。
 
@@ -283,6 +299,9 @@ docker container restart VPN_CONTAINER_NAME
 - Probe 格式：`http://HOST:PORT/PATH`（`wget --spider`，2xx 為就緒）或
   `tcp://HOST:PORT`（`nc -z`）。
 - 任一步失敗：runtime profile 已安全寫入但**不提交**；下一輪完整重試。
+- Gluetun defaults to sidecar `ddns-openvpn-vproxy` when names are omitted; an
+  explicitly empty canonical sidecar name is invalid. Other backends default to
+  no sidecar.
 - gluetun backend 必須設定 sidecar（vproxy 不會因 Gluetun restart 自動重建
   namespace）。
 
@@ -402,6 +421,12 @@ service_healthy` 不變慢。Gluetun image 內建 5s healthcheck 的 `test` 保�
 節奏。`docker-socket-proxy` 以單一 HAProxy process（無 master-worker）、
 `nbthread 1`、`maxconn 32` 執行。
 
+Watcher startup must not wait directly or transitively for VPN health. In the
+Gluetun stack, watcher → Gluetun, watcher → vproxy and vproxy → Gluetun use
+`service_started`; only the Docker API proxy requires `service_healthy` for
+watcher startup. Runtime readiness still gates IP/fingerprint commits. Init is
+one-shot (`restart: "no"`); long-running services retain `unless-stopped`.
+
 ## 11. Health model
 
 | Service | 機制 |
@@ -414,18 +439,28 @@ service_healthy` 不變慢。Gluetun image 內建 5s healthcheck 的 `test` 保�
 | `openconnect` | `tun0` UP、預設 route 走 `tun0`、`:8888` 與 `:8889` listening |
 | `singbox` | 經 `:1080` mixed inbound（含認證）抓取 `SINGBOX_HEALTH_URL` |
 
-## 12. 相容性政策
+## 12. Compatibility policy
 
-- **向後相容**：`docker-compose.yml` 仍是 gluetun stack；既有 `.env`（含 legacy
-  alias）與 `vpn-state` volume 不需 migration。
-- **Deprecated**：§4.4 的 alias 與 `scripts/ddns-openvpn.sh` 至少保留一個 major
-  版本。
-- **Frozen**：`compat/watcher/` 是給更早期部署（仍 pull
-  `ghcr.io/df-wu/ddns-openvpn-proxy-watcher` image）的 fail-safe watcher。它不再新增
-  功能，只在上游 base image 有安全問題時重新發布；`Containerfile` 命名是為了不觸犯
-  §3.2「不得含 Dockerfile」的 Compose-only 規則。
-- **版本**：`CHANGELOG.md` 依 Keep a Changelog；改變本文件的任何 MUST 都是
-  breaking change。
+- **Standard OpenVPN/WireGuard layout**: `docker-compose.yml` remains the Gluetun
+  stack. Existing `.env` aliases and `vpn-state` data remain usable when the
+  source paths, Compose project name and state volume are preserved. Unchanged
+  profiles retain rendered bytes, selected IP and fingerprint, with no extra
+  helper restart. Service recreation during deployment still causes downtime.
+- **Required recipe migration**: ship the selected stack, `compose/core.yml`,
+  `docker/` configuration and the entire `scripts/` tree (`lib/`, `adapters/`
+  included). Update custom mounts, entrypoints and healthchecks to the directory
+  mount `/opt/ddns` and `/opt/ddns/ddns-vpn.sh`. The deprecated
+  `scripts/ddns-openvpn.sh` is a command alias, not a standalone file; copying
+  or mounting only that file fails because its implementation is missing.
+- **Deprecated**: the §4.4 aliases and the old command name remain available for
+  at least one major version, subject to the full-tree requirement above.
+- **Frozen compat layout**: `compat/watcher/` and the publishing workflow are
+  unchanged. Deployments using the pinned
+  `ghcr.io/df-wu/ddns-openvpn-proxy-watcher` image keep their own recipe and state
+  layout. They do not adopt this helper merely by merging or pulling this repo;
+  the standard main-to-head state guarantee does not cover that layout.
+- **Versioning**: `CHANGELOG.md` follows Keep a Changelog. Changes to a MUST in
+  this specification are breaking changes.
 
 ## 13. 擴充契約：新增一種 VPN 連線方式
 
@@ -439,7 +474,7 @@ service_healthy` 不變慢。Gluetun image 內建 5s healthcheck 的 `test` 保�
    | `adapter_display_name` | 印出人類可讀名稱 |
    | `adapter_validate` | 驗證 `$source_config` 與環境；設定 `endpoint_host`（必要）與 `endpoint_port`；錯誤時 `die` |
    | `adapter_fingerprint` | 印出涵蓋 profile 與所有被引用檔案的 SHA-256 |
-   | `adapter_render IP` | 以 `install_rendered` 原子寫入 `$rendered_config`（及需要時 `$rendered_env`） |
+   | `adapter_render IP` | 以 `install_rendered DESTINATION COMMAND [ARG...]` 原子寫入 `$rendered_config`（及需要時 `$rendered_env`） |
 
    可用的全域：`source_config`、`rendered_config`、`rendered_env`、`state_dir`、
    `vpn_type`；可用的 helper：`die`、`log`、`is_uint`、`is_ipv4`、

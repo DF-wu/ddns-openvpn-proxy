@@ -121,15 +121,21 @@ write_state() {
   mv -f "$temporary" "$destination"
 }
 
-# Usage: producer_command | install_rendered DESTINATION
+# Usage: install_rendered DESTINATION COMMAND [ARG...] (checks producer status).
+# The stdin form remains for experimental adapters.
 install_rendered() {
   destination=$1
+  shift
   directory=$(dirname "$destination")
-  mkdir -p "$directory"
-  temporary=$(mktemp "$directory/.render.XXXXXX")
-  cat > "$temporary"
-  chmod 600 "$temporary"
-  mv -f "$temporary" "$destination"
+  mkdir -p "$directory" || return 1
+  temporary=$(mktemp "$directory/.render.XXXXXX") || return 1
+  if {
+    if [ "$#" -gt 0 ]; then "$@"; else cat; fi
+  } > "$temporary" && chmod 600 "$temporary" && mv -f "$temporary" "$destination"; then
+    return 0
+  fi
+  rm -f "$temporary"
+  return 1
 }
 
 file_sha256() {

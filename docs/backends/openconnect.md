@@ -4,8 +4,10 @@
 Cisco AnyConnect／ocserv、Juniper Network Connect、Palo Alto GlobalProtect、Pulse
 Connect Secure、F5 BIG-IP、FortiGate SSL VPN、Array Networks。
 
-成熟度：**Beta**。helper 契約、Compose 契約與 container 啟動行為有自動測試；真實
-gateway 的連線需要依 [testing.md](../testing.md) 的驗收清單在 staging 完成。
+Maturity: **Developing / experimental**. Existing tests cover selected helper,
+Compose and container contracts, but real gateway connectivity, authentication,
+MFA, tunnel recovery and certificate-only login remain unverified. This backend
+is retained for future work and is not production validated.
 
 ## 上游元件
 

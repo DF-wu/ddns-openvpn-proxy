@@ -6,6 +6,34 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore profile validation and endpoint discovery before every watcher poll.
+  OpenVPN/WireGuard hostname edits now resolve the new endpoint; an explicit
+  `DDNS_HOSTNAME` remains authoritative. Invalid edits fail before rendering,
+  restarting or committing IP/fingerprint state, including missing OpenVPN
+  references whose pipeline failure must propagate out of the watch loop.
+- Remove the transitive Gluetun health gate from vproxy startup so the watcher
+  can start DDNS recovery before the VPN is healthy; add an actual Compose
+  startup contract with isolated failing-health fixtures.
+- Preserve the last good OpenVPN/WireGuard runtime profile when the render
+  producer fails; init and watch do not commit state or restart after failure.
+- Restore Gluetun's omitted legacy sidecar default; other backends keep an
+  optional sidecar.
+- Add actual multi-iteration watch regressions and full-chain failure/retry
+  checks for both established protocols.
+
+### Compatibility and experimental status
+
+- The legacy helper filename is an alias requiring the full `scripts/` tree;
+  adopting this refactor also requires `compose/core.yml`, `docker/` files and
+  updated custom mounts/entrypoints/healthchecks. Standard main-to-head state
+  compatibility assumes unchanged source paths, project and volume. Frozen
+  compat image deployments have a separate recipe/state layout.
+- OpenConnect and sing-box are **Developing / experimental**, with real gateway
+  authentication and recovery unverified. sing-box's hostname regex overmatch
+  and valid multiline JSON parsing P2 defects remain unresolved.
+
 ### Changed — 小主機效率與透明／無痕
 
 - **Gluetun HTTP proxy 固定 stealth**：原預設 `HTTPPROXY_STEALTH=off` 會對每個明文
@@ -32,12 +60,12 @@
 
 - 正式規格文件 `docs/spec.md`：術語、backend／adapter 模型、設定契約、runtime
   state、生命週期狀態機、CLI、log、安全與相容性政策、擴充流程。
-- **OpenConnect backend**（`docker-compose.openconnect.yml`、`VPN_TYPE=openconnect`）：
+- **OpenConnect backend (Developing / experimental)**（`docker-compose.openconnect.yml`、`VPN_TYPE=openconnect`）：
   支援 AnyConnect／ocserv、GlobalProtect、Pulse、F5、Fortinet、Array，使用
   `wazum/openconnect-proxy:2.1.0`；helper 以 `resolve=HOST:IP` 讓 OpenConnect 連到
   DDNS 解析結果並仍以 hostname 驗證憑證。Loopback-only（上游 image 的 proxy 無
   authentication）。
-- **sing-box backend**（`docker-compose.singbox.yml`、`VPN_TYPE=singbox`）：支援
+- **sing-box backend (Developing / experimental)**（`docker-compose.singbox.yml`、`VPN_TYPE=singbox`）：支援
   Shadowsocks、VMess、VLESS、Trojan、Hysteria2、TUIC、ShadowTLS、AnyTLS、SSH 等
   sing-box outbound，使用官方 `ghcr.io/sagernet/sing-box:v1.14.2`。proxy-only 模式，
   無 TUN、無 NET_ADMIN、read-only root；stack 管理 inbound、DNS 與預設路由，HTTP／
@@ -49,8 +77,8 @@
   （`http://`／`tcp://`），可選 `SIDECAR_CONTAINER_NAME`＋`SIDECAR_HEALTH_PROBE`。
 - Docker socket proxy 的 restart-only policy 改由 `RESTART_TARGETS` 動態產生，
   支援單一或多個 restart target。
-- 測試：`tests/helper.sh` 48 案例（含 OpenConnect／sing-box）、
-  `tests/compose-validation.sh` 22 案例、`tests/container-contract.sh` 涵蓋三個
+- 測試：`tests/helper.sh` 73 cases（含 OpenConnect／sing-box）、
+  `tests/compose-validation.sh` 24 cases、`tests/container-contract.sh` 涵蓋三個
   backend，sing-box 以本機 Shadowsocks server 做真實資料路徑驗證。
 - 範例：`examples/openconnect/client.conf`、`examples/sing-box/config.json`。
 - `CHANGELOG.md`、`make shellcheck`。

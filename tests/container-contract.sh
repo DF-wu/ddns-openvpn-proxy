@@ -9,6 +9,7 @@ set -eu
 # closed port, Gluetun against Alpine stand-ins for the restart-only API.
 
 repo_root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
+sh "$repo_root/tests/startup-dependencies.sh"
 suffix=$$
 project=ddns-contract-$suffix
 source_dir=$(mktemp -d)

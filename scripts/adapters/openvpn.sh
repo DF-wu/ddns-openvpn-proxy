@@ -130,7 +130,8 @@ adapter_render() {
   resolved_ip=$1
   source_parent=$(dirname "$source_config")
 
-  awk -v ip="$resolved_ip" -v source_parent="$source_parent" \
+  # shellcheck disable=SC2016 # The producer arguments include an awk program.
+  install_rendered "$rendered_config" awk -v ip="$resolved_ip" -v source_parent="$source_parent" \
       -v directives="^($openvpn_file_directives)\$" '
     function absolute(path) {
       if (path == "" || path == "stdin" || path ~ /^\//) return path
@@ -150,5 +151,5 @@ adapter_render() {
     }
 
     { print }
-  ' "$source_config" | install_rendered "$rendered_config"
+  ' "$source_config"
 }

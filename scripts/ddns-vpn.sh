@@ -38,7 +38,9 @@ poll_seconds=${DDNS_POLL_SECONDS:-60}
 retry_seconds=${DDNS_INIT_RETRY_SECONDS:-5}
 vpn_container=${VPN_CONTAINER_NAME:-${GLUETUN_CONTAINER_NAME:-ddns-openvpn-proxy}}
 vpn_probe=${VPN_HEALTH_PROBE:-${GLUETUN_HEALTHCHECK_URL:-http://gluetun:9999}}
-sidecar_container=${SIDECAR_CONTAINER_NAME:-${VPROXY_CONTAINER_NAME:-}}
+sidecar_default=
+case $vpn_type in openvpn|wireguard) sidecar_default=ddns-openvpn-vproxy ;; esac
+sidecar_container=${SIDECAR_CONTAINER_NAME-${VPROXY_CONTAINER_NAME:-$sidecar_default}}
 sidecar_probe=${SIDECAR_HEALTH_PROBE:-tcp://gluetun:1080}
 restart_timeout=${VPN_RESTART_TIMEOUT_SECONDS:-${GLUETUN_RESTART_TIMEOUT_SECONDS:-20}}
 health_timeout=${VPN_HEALTH_TIMEOUT_SECONDS:-${GLUETUN_HEALTH_TIMEOUT_SECONDS:-120}}
@@ -165,7 +167,8 @@ validate_environment() {
 
 validate_config() {
   load_adapter
-  adapter_validate
+  # watch_once runs in an OR list, so pipeline failures need explicit handling.
+  adapter_validate || die "invalid $vpn_type profile: $source_config"
   validate_environment
 }
 
@@ -182,7 +185,7 @@ initialize() {
   while :; do
     previous_ip=$(read_state "$last_ip_file" || true)
     if selected_ip=$(resolve_and_select "$previous_ip"); then
-      render_config "$selected_ip"
+      render_config "$selected_ip" || return 1
       write_state "$selected_ip" "$last_ip_file"
       write_state "$(adapter_fingerprint)" "$source_hash_file"
       log INFO "rendered profile vpn_type=$vpn_type hostname=$ddns_hostname ip=$selected_ip output=$rendered_config"
@@ -195,6 +198,7 @@ initialize() {
 }
 
 watch_once() {
+  validate_config
   touch_heartbeat
   previous_ip=$(read_state "$last_ip_file" || true)
   previous_hash=$(read_state "$source_hash_file" || true)
@@ -213,7 +217,7 @@ watch_once() {
 
   reason=profile-change
   [ "$selected_ip" = "$previous_ip" ] || reason=address-change
-  render_config "$selected_ip"
+  render_config "$selected_ip" || return 1
 
   if restart_vpn_stack; then
     write_state "$selected_ip" "$last_ip_file"
